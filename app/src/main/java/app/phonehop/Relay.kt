@@ -9,6 +9,14 @@ import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
+/** Recent round-trip times (milliseconds) as the relay sees them: a packet forwarded to the server until its answer returns. */
+class RttLog(private val capacity: Int = 900) {
+    private val items = ArrayDeque<Pair<Long, Double>>()
+    @Synchronized fun add(ms: Double) { if (items.size >= capacity) items.removeFirst(); items.addLast(System.currentTimeMillis() to ms) }
+    @Synchronized fun since(at: Long): List<Double> = items.filter { it.first >= at }.map { it.second }
+    @Synchronized fun clear() = items.clear()
+}
+
 /** What the relay has done; read by the UI once a second for the graph and status line. */
 class RelayStats {
     /** Bytes received from the router (heading to the VPN server). */
@@ -16,6 +24,9 @@ class RelayStats {
     /** Bytes received from the VPN server (heading to the router). */
     val toRouter = AtomicLong()
     val dropped = AtomicLong()
+    /** Tunnel round trips seen by the relay, and the slowest time (microseconds) it took to forward one packet. */
+    val rtt = RttLog()
+    val maxForwardUs = AtomicLong()
     /** Send failures, and how often the sockets were re-opened to recover from a stall. */
     val sendErrors = AtomicLong()
     val upstreamRebinds = AtomicLong()
@@ -78,6 +89,7 @@ class Relay(
     private val sentSinceReply = AtomicLong()
     private val receivedSinceRouterPacket = AtomicLong()
     @Volatile private var lastUpstreamHeal = 0L
+    @Volatile private var awaitingSince = 0L // nanoTime of the oldest packet sent to the server with no answer yet
     @Volatile private var lastListenHeal = 0L
 
     /** Actual bound port once listening, else -1. */
@@ -113,6 +125,17 @@ class Relay(
     fun rebindUpstream() { upstreamSocket?.close() }
 
     val isRunning get() = running.get()
+
+    /**
+     * Sends one byte to the VPN server on the upstream socket. The server ignores it, but it keeps the phone's
+     * cellular radio out of its low-power state, where every packet waits for the radio to wake.
+     */
+    fun poke() {
+        val up = upstreamSocket
+        val target = upstream
+        if (up == null || target == null) return
+        try { up.send(DatagramPacket(ByteArray(1), 1, target)) } catch (e: Exception) { stats.sendErrors.incrementAndGet() }
+    }
 
     // ---------------------------------------------------------------- router -> server
 
@@ -154,6 +177,7 @@ class Relay(
     }
 
     private fun onFromRouter(p: DatagramPacket) {
+        val startedNs = System.nanoTime()
         val src = InetSocketAddress(p.address, p.port)
         if (!allowedSource(p.address) || !WireGuardPacket.isValid(p.data, p.length)) {
             stats.dropped.incrementAndGet()
@@ -172,6 +196,9 @@ class Relay(
         sentSinceReply.addAndGet(p.length.toLong())
         try {
             up.send(DatagramPacket(p.data, p.length, target))
+            if (awaitingSince == 0L) awaitingSince = startedNs
+            val tookUs = (System.nanoTime() - startedNs) / 1_000
+            stats.maxForwardUs.accumulateAndGet(tookUs) { a, b -> maxOf(a, b) }
         } catch (e: Exception) {
             stats.dropped.incrementAndGet()
             stats.sendErrors.incrementAndGet()
@@ -217,6 +244,8 @@ class Relay(
         if (router == null || out == null) { stats.dropped.incrementAndGet(); return }
         stats.lastFromUpstreamAt = System.currentTimeMillis()
         stats.toRouter.addAndGet(p.length.toLong())
+        val since = awaitingSince
+        if (since != 0L) { awaitingSince = 0L; stats.rtt.add((System.nanoTime() - since) / 1_000_000.0) }
         sentSinceReply.set(0)
         receivedSinceRouterPacket.addAndGet(p.length.toLong())
         try {

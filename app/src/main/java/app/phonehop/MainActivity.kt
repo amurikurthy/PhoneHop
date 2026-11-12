@@ -297,14 +297,14 @@ class MainActivity : Activity() {
                 latencyPanel,
                 latencySummary,
                 ui.labeled("Wi-Fi lock", lockSegmented, "Keeps the phone's Wi-Fi radio from power-saving. Try each and watch the graph; Low latency only works with the screen on."),
-                ui.toggle("Keep link warm (test)", prefs.getBoolean("keep_warm", false)) { on ->
+                ui.toggle("Keep link and cellular warm (test)", prefs.getBoolean("keep_warm", false)) { on ->
                     prefs.edit().putBoolean("keep_warm", on).apply()
                     RelayRuntime.setKeepWarm(on)
                 },
-                ui.caption("Sends a tiny packet to the router every 150 ms so the phone's Wi-Fi never sleeps. Uses more battery. Turn it on while pinging from a laptop to see whether the delay swings disappear."),
+                ui.caption("Keeps both radios awake with tiny packets: to the router every 150 ms and to the Mullvad server about every half second. Uses more battery and roughly 150 MB of mobile data a month. Turn it on while pinging from a laptop to see whether the delay swings disappear."),
                 batteryNote,
                 batteryButton,
-                ui.secondary("Clear stats") { RelayRuntime.latency.clear(); latencySummary.text = "Measuring..." },
+                ui.secondary("Clear stats") { RelayRuntime.latency.clear(); RelayRuntime.stats.rtt.clear(); RelayRuntime.stats.maxForwardUs.set(0); latencySummary.text = "Measuring..." },
             ), ui.cardParams()
         )
 
@@ -388,7 +388,7 @@ class MainActivity : Activity() {
         // ---- Log
         logView = ui.mono("", 11f)
         place(
-            ui.collapsible("Log", null, logView, ui.secondary("Clear log") { logView.text = "" }),
+            ui.collapsible("Log", "Share diagnostics sends a detailed report (latency samples, relay counters, screen and network events) to any app you choose. It never contains your account number, passwords or keys.", logView, ui.secondary("Share diagnostics") { shareDiagnostics() }, ui.secondary("Clear log") { logView.text = "" }),
             ui.cardParams()
         )
 
@@ -663,6 +663,61 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- Mullvad account
 
+    /** Builds the detailed report, keeps a copy in the app's files, and opens the share sheet. */
+    private fun shareDiagnostics() {
+        val st = RelayRuntime.stats
+        val now = System.currentTimeMillis()
+        fun ago(t: Long) = if (t == 0L) "never" else "${(now - t) / 1000}s ago"
+        val pm = getSystemService(PowerManager::class.java)
+        val report = DiagnosticsReport.build(
+            DiagnosticsReport.In(
+                version = versionName(),
+                device = "${Build.MANUFACTURER} ${Build.MODEL}",
+                android = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+                nowMillis = now,
+                settings = listOf(
+                    "Server" to (selectedRelay?.let { "${it.hostname} ${it.ipv4}" } ?: "none"),
+                    "Server selection" to if (prefs.getBoolean(PREF_AUTO, true)) "auto" else "manual",
+                    "Wi-Fi lock" to WifiLockMode.fromPrefs(prefs).label,
+                    "Keep warm" to prefs.getBoolean("keep_warm", false).toString(),
+                    "Link network" to (ssidField.text.toString()),
+                    "Router paired" to (profiles.active()?.title ?: "no"),
+                ),
+                state = listOf(
+                    "Link address" to (RelayRuntime.linkAddress()?.hostAddress ?: "not joined"),
+                    "Relay listening" to (st.listening ?: "no"),
+                    "Router seen at" to (st.routerAddress?.let { "${it.address.hostAddress}:${it.port}" } ?: "never"),
+                    "Router last packet" to ago(st.lastFromRouterAt),
+                    "Server last reply" to ago(st.lastFromUpstreamAt),
+                    "Relayed up/down" to "${st.fromRouter.get()} / ${st.toRouter.get()} bytes",
+                    "Dropped / send errors" to "${st.dropped.get()} / ${st.sendErrors.get()}",
+                    "Socket re-opens (upstream/listener)" to "${st.upstreamRebinds.get()} / ${st.listenRebinds.get()}",
+                    "Relay forwarding, slowest" to "${st.maxForwardUs.get() / 1000.0} ms",
+                    "Internet network" to RelayRuntime.internetText,
+                    "Screen interactive" to pm.isInteractive.toString(),
+                    "Doze" to pm.isDeviceIdleMode.toString(),
+                    "Battery saver" to pm.isPowerSaveMode.toString(),
+                    "Battery unrestricted" to pm.isIgnoringBatteryOptimizations(packageName).toString(),
+                ),
+                samples = RelayRuntime.latency.snapshot(),
+                tunnelRtt = st.rtt.since(0),
+                events = RelayRuntime.recentEvents().map { it.at to it.msg },
+                log = logView.text.toString(),
+            )
+        )
+        runCatching { java.io.File(filesDir, "diagnostics-${now / 1000}.txt").writeText(report) }
+        log("Diagnostics report built (${report.length / 1024} KB)")
+        startActivity(
+            android.content.Intent.createChooser(
+                android.content.Intent(android.content.Intent.ACTION_SEND)
+                    .setType("text/plain")
+                    .putExtra(android.content.Intent.EXTRA_SUBJECT, "PhoneHop diagnostics")
+                    .putExtra(android.content.Intent.EXTRA_TEXT, report),
+                "Share diagnostics"
+            )
+        )
+    }
+
     private fun updateStatusCard() {
         val st = RelayRuntime.stats
         val heard = if (st.lastFromRouterAt == 0L) null else (System.currentTimeMillis() - st.lastFromRouterAt) / 1000
@@ -698,7 +753,9 @@ class MainActivity : Activity() {
             appendLine(row("Link, screen on", recent.filter { it.screenOn }.mapNotNull { it.linkMs }))
             appendLine(row("Link, screen off", recent.filter { !it.screenOn }.mapNotNull { it.linkMs }))
             appendLine(row("Internet, on", recent.filter { it.screenOn }.mapNotNull { it.internetMs }))
-            append(row("Internet, off", recent.filter { !it.screenOn }.mapNotNull { it.internetMs }))
+            appendLine(row("Internet, off", recent.filter { !it.screenOn }.mapNotNull { it.internetMs }))
+            appendLine(row("Tunnel via relay", RelayRuntime.stats.rtt.since(cutoff)))
+            append("Relay forwarding: slowest ${"%.1f".format(Locale.US, RelayRuntime.stats.maxForwardUs.get() / 1000.0)} ms")
             append("\n(spikes are readings of 150 ms or more)")
         }
     }

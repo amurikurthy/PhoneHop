@@ -226,8 +226,9 @@ object RelayRuntime {
     private var warmThread: Thread? = null
 
     /**
-     * Sends a one-byte packet to the router every 150 ms so the phone's Wi-Fi never drops into power saving, where
-     * the router's packets wait for the next wake-up. Costs battery; for finding out whether that is the latency problem.
+     * Keeps the link awake: a one-byte packet to the router every 150 ms (so the phone's Wi-Fi never power-saves) and a
+     * one-byte packet to the VPN server about every 450 ms (so the cellular radio stays awake). Costs battery and about
+     * 150 MB of mobile data a month; for finding out whether idle radios are the latency problem.
      */
     @Synchronized
     fun setKeepWarm(on: Boolean) {
@@ -237,7 +238,11 @@ object RelayRuntime {
         warmThread = Thread({
             var socket: DatagramSocket? = null
             val target = InetAddress.getByName(Link.ROUTER_IP)
+            var tick = 0
             while (keepWarm) {
+                // Every 3rd tick (about 450 ms) also keep the cellular radio awake: with the screen off it sleeps within
+                // a second or two, and each packet then waits about half a second for it to wake.
+                if (tick++ % 3 == 0) relay?.poke()
                 try {
                     if (socket == null) {
                         val n = linkNetwork()
