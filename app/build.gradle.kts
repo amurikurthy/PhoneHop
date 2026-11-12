@@ -1,7 +1,18 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+// Release signing comes from environment variables (CI) or an untracked keystore.properties
+// file (local builds). If neither is present, assembleRelease produces an unsigned APK.
+val keystoreProps = Properties().apply {
+    rootProject.file("keystore.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+}
+fun signingValue(env: String, prop: String): String? = System.getenv(env) ?: keystoreProps.getProperty(prop)
+val keystorePath: String? = System.getenv("KEYSTORE_FILE")
+    ?: keystoreProps.getProperty("storeFile")?.let { rootProject.file(it).path }
 
 android {
     namespace = "app.phonehop"
@@ -11,12 +22,27 @@ android {
         applicationId = "app.phonehop"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // CI passes these from the git tag (v1.2.3 -> name 1.2.3, code 10203).
+        versionName = (findProperty("versionName") as String?) ?: "0.2.0"
+        versionCode = ((findProperty("versionCode") as String?) ?: "200").toInt()
+    }
+
+    signingConfigs {
+        if (keystorePath != null) {
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = signingValue("KEYSTORE_PASSWORD", "storePassword")
+                keyAlias = signingValue("KEY_ALIAS", "keyAlias")
+                keyPassword = signingValue("KEY_PASSWORD", "keyPassword")
+            }
+        }
     }
 
     buildTypes {
-        release { isMinifyEnabled = false }
+        release {
+            isMinifyEnabled = false
+            if (keystorePath != null) signingConfig = signingConfigs.getByName("release")
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

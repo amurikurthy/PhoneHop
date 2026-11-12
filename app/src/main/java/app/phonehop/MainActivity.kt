@@ -46,6 +46,8 @@ class MainActivity : Activity() {
     private lateinit var serverSpinner: Spinner
     private lateinit var selectedView: TextView
     private lateinit var p2p: WifiDirectController
+    private lateinit var updateStatus: TextView
+    private val updater by lazy { Updater(this) }
 
     private var relayList: MullvadApi.RelayList? = null
     private var countryRelays: List<MullvadApi.Relay> = emptyList()
@@ -57,6 +59,74 @@ class MainActivity : Activity() {
         p2p = WifiDirectController(this, ::log, ::showGroup)
         setContentView(buildUi())
         log("PhoneHop ${BuildConfigInfo.versionName(this)} on Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), ${Build.MANUFACTURER} ${Build.MODEL}")
+        Updater.statusListener = { msg -> setUpdateStatus(msg) }
+        // Only on a fresh launch, not on rotation, so we don't re-check repeatedly.
+        if (savedInstanceState == null && prefs.getBoolean("auto_update", true)) checkForUpdates(auto = true)
+    }
+
+    override fun onDestroy() {
+        Updater.statusListener = null
+        super.onDestroy()
+    }
+
+    // ---------------------------------------------------------------- Updates
+
+    private fun setUpdateStatus(msg: String) {
+        log("Update: $msg")
+        runOnUiThread { updateStatus.text = "Version ${updater.currentVersion()}\n$msg" }
+    }
+
+    /**
+     * auto = true: install silently if newer (Android may still ask the user to confirm).
+     * auto = false: ask before installing.
+     */
+    private fun checkForUpdates(auto: Boolean) {
+        io.execute {
+            try {
+                setUpdateStatus("Checking GitHub...")
+                val release = updater.fetchLatest()
+                if (!updater.isNewer(release.version)) {
+                    setUpdateStatus("Up to date (latest is ${release.tag})")
+                    return@execute
+                }
+                setUpdateStatus("New version ${release.tag} available")
+                if (auto) installRelease(release)
+                else runOnUiThread {
+                    android.app.AlertDialog.Builder(this)
+                        .setTitle("Update to ${release.tag}?")
+                        .setMessage(release.notes.ifBlank { "No release notes." }.take(600))
+                        .setPositiveButton("Install") { _, _ -> io.execute { installRelease(release) } }
+                        .setNegativeButton("Later", null)
+                        .show()
+                }
+            } catch (e: Updater.NoReleaseException) {
+                setUpdateStatus("No releases published yet")
+            } catch (e: Exception) {
+                setUpdateStatus("Check failed: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+    }
+
+    private fun installRelease(release: Updater.Release) {
+        if (!updater.canInstall()) {
+            setUpdateStatus("Allow PhoneHop to install apps, then check again")
+            runOnUiThread {
+                startActivity(
+                    android.content.Intent(
+                        android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        android.net.Uri.parse("package:$packageName")
+                    )
+                )
+            }
+            return
+        }
+        try {
+            setUpdateStatus("Downloading ${release.apkName} (${release.size / 1024} KB)...")
+            updater.downloadAndInstall(release) { pct -> setUpdateStatus("Downloaded $pct%") }
+            setUpdateStatus("Verified; installing...")
+        } catch (e: Exception) {
+            setUpdateStatus("Update failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
     }
 
     override fun onStart() {
@@ -77,6 +147,19 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(12), dp(16), dp(24))
         }
+
+        root.addView(header("Updates"))
+        updateStatus = TextView(this).apply {
+            textSize = 12f
+            text = "Version ${updater.currentVersion()}"
+        }
+        root.addView(updateStatus)
+        root.addView(Switch(this).apply {
+            text = "Check and install updates on launch"
+            isChecked = prefs.getBoolean("auto_update", true)
+            setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("auto_update", on).apply() }
+        })
+        root.addView(button("Check for updates now") { checkForUpdates(auto = false) })
 
         root.addView(header("1. Wi-Fi Direct group"))
         root.addView(note("The router will join this as a normal Wi-Fi network. SSID is always DIRECT-ph-<name>."))
