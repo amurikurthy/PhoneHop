@@ -10,7 +10,7 @@ class DiagnosticsReportTest {
         settings = listOf("Server" to "us-chi-wg-301", "Wi-Fi lock" to "High perf"),
         state = listOf("Link address" to "192.168.51.2", "Screen" to "on"),
         samples = listOf(
-            LatencySample(1_800_000_000_000L, true, 7.0, 84.0, 5_000.0),
+            LatencySample(1_800_000_000_000L, true, 7.0, 84.0, 5_000.0, internet2Ms = 190.0, otherKbps = 450.0, signalDbm = -97),
             LatencySample(1_800_000_002_000L, false, 78.0, null),
         ),
         tunnelRtt = listOf(45.0, 520.0, 60.0),
@@ -31,7 +31,8 @@ class DiagnosticsReportTest {
         assertTrue(r, r.contains("Internet, screen off: no data"))
         assertTrue(r, r.contains("Tunnel via relay: n=3"))
         assertTrue(r, r.contains("45 520 60"))
-        assertTrue(r, r.contains(",on,7,84,5000"))
+        assertTrue(r, r.contains(",on,7,84,5000,190,450,-97"))
+        assertTrue(r, r.contains("Spikes (>=150 ms): both targets 0, only Mullvad 0, only 1.1.1.1 1"))
         assertTrue(r, r.contains("Internet, loaded (>=200 kbps relayed): n=1"))
         assertTrue(r, r.contains(",off,78,,0"))
     }

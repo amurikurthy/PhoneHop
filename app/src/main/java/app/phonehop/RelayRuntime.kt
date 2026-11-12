@@ -91,7 +91,10 @@ object RelayRuntime {
                 if (cellular == n) { cellular = null; event("Cellular lost"); r.rebindUpstream() }
             }
             override fun onCapabilitiesChanged(n: Network, c: NetworkCapabilities) {
-                if (n == cellular) internetText = describe(c)
+                if (n == cellular) {
+                    internetText = describe(c)
+                    cellSignal = c.signalStrength.takeIf { it != NetworkCapabilities.SIGNAL_STRENGTH_UNSPECIFIED }
+                }
             }
         }
         cellularCallback = cellCb
@@ -128,6 +131,9 @@ object RelayRuntime {
             log = latency,
             linkSocket = { linkNetwork()?.socketFactory?.createSocket() ?: java.net.Socket() },
             loadKbps = ::currentLoadKbps,
+            internet2Target = { InetSocketAddress("1.1.1.1", 443) },
+            otherKbps = { lastOtherKbps },
+            signalDbm = { cellSignal },
         ).also { it.start() }
         event("Relay started")
     }
@@ -262,6 +268,9 @@ object RelayRuntime {
 
     private var loadBytes = 0L
     private var loadAt = 0L
+    private var mobileBytes = 0L
+    @Volatile private var lastOtherKbps = 0.0
+    @Volatile private var cellSignal: Int? = null
 
     /** Relayed kilobits per second since the previous call (both directions). */
     @Synchronized
@@ -269,6 +278,11 @@ object RelayRuntime {
         val now = System.currentTimeMillis()
         val bytes = stats.fromRouter.get() + stats.toRouter.get()
         val kbps = if (loadAt == 0L || now <= loadAt) 0.0 else (bytes - loadBytes) * 8.0 / (now - loadAt)
+        // Everything else on the phone's cellular connection: its total minus what the relay carried (plus ~5% for headers).
+        val mobile = android.net.TrafficStats.getMobileRxBytes().coerceAtLeast(0) + android.net.TrafficStats.getMobileTxBytes().coerceAtLeast(0)
+        lastOtherKbps = if (loadAt == 0L || now <= loadAt || mobileBytes == 0L) 0.0
+            else maxOf(0.0, (mobile - mobileBytes) * 8.0 / (now - loadAt) - kbps * 1.05)
+        mobileBytes = mobile
         loadBytes = bytes; loadAt = now
         return kbps
     }

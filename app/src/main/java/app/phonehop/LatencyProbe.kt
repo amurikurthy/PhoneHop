@@ -7,7 +7,15 @@ import javax.net.SocketFactory
 
 /** One reading of both paths. A null value means that path could not be measured at that moment. */
 /** [loadKbps] is how much traffic the relay was carrying when the sample was taken (kilobits per second). */
-data class LatencySample(val at: Long, val screenOn: Boolean, val linkMs: Double?, val internetMs: Double?, val loadKbps: Double = 0.0)
+/**
+ * [internet2Ms] is a second, unrelated server over the same path (if both spike together the phone's cellular path is
+ * at fault, if only one does it is that server); [otherKbps] is the phone's other cellular traffic (not the relay's);
+ * [signalDbm] is the cellular signal strength when the network reports it.
+ */
+data class LatencySample(
+    val at: Long, val screenOn: Boolean, val linkMs: Double?, val internetMs: Double?, val loadKbps: Double = 0.0,
+    val internet2Ms: Double? = null, val otherKbps: Double = 0.0, val signalDbm: Int? = null,
+)
 
 /** Thread-safe ring buffer of recent samples. */
 class LatencyLog(private val capacity: Int = 900) {
@@ -65,6 +73,9 @@ class LatencyProbe(
     private val linkSocket: () -> Socket = { Socket() },
     /** Current relayed traffic, so latency can be split into idle and loaded. */
     private val loadKbps: () -> Double = { 0.0 },
+    private val internet2Target: () -> InetSocketAddress? = { null },
+    private val otherKbps: () -> Double = { 0.0 },
+    private val signalDbm: () -> Int? = { null },
 ) {
     @Volatile private var running = false
     private var thread: Thread? = null
@@ -81,7 +92,12 @@ class LatencyProbe(
                 val internet = if (net != null && target != null) {
                     measureConnectMs(target, timeoutMs) { net.socketFactory.createSocket() }
                 } else null
-                val sample = LatencySample(System.currentTimeMillis(), screenOn(), link, internet, loadKbps())
+                val target2 = internet2Target()
+                val internet2 = if (net != null && target2 != null) {
+                    measureConnectMs(target2, timeoutMs) { net.socketFactory.createSocket() }
+                } else null
+                val load = loadKbps()
+                val sample = LatencySample(System.currentTimeMillis(), screenOn(), link, internet, load, internet2, otherKbps(), signalDbm())
                 log.add(sample)
                 onSample(sample)
                 val wait = intervalMs - (System.currentTimeMillis() - started)

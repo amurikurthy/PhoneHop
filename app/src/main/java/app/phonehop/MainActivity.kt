@@ -756,6 +756,7 @@ class MainActivity : Activity() {
             appendLine(row("Internet, off", recent.filter { !it.screenOn }.mapNotNull { it.internetMs }))
             appendLine(row("Internet, idle", recent.filter { it.loadKbps < IDLE_KBPS }.mapNotNull { it.internetMs }))
             appendLine(row("Internet, loaded", recent.filter { it.loadKbps >= IDLE_KBPS }.mapNotNull { it.internetMs }))
+            appendLine(row("Internet, 1.1.1.1", recent.mapNotNull { it.internet2Ms }))
             appendLine(row("Tunnel via relay", RelayRuntime.stats.rtt.since(cutoff)))
             append("Relay forwarding: slowest ${"%.1f".format(Locale.US, RelayRuntime.stats.maxForwardUs.get() / 1000.0)} ms")
             append("\n(spikes are readings of 150 ms or more)")

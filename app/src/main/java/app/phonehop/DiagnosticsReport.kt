@@ -52,14 +52,20 @@ object DiagnosticsReport {
             summary("Internet, screen off", i.samples.filter { !it.screenOn }.mapNotNull { it.internetMs })
             summary("Internet, idle (<200 kbps relayed)", i.samples.filter { it.loadKbps < 200.0 }.mapNotNull { it.internetMs })
             summary("Internet, loaded (>=200 kbps relayed)", i.samples.filter { it.loadKbps >= 200.0 }.mapNotNull { it.internetMs })
+            summary("Second target 1.1.1.1", i.samples.mapNotNull { it.internet2Ms })
+            val both = i.samples.filter { it.internetMs != null && it.internet2Ms != null }
+            appendLine("Spikes (>=150 ms): both targets ${both.count { it.internetMs!! >= 150 && it.internet2Ms!! >= 150 }}, " +
+                "only Mullvad ${both.count { it.internetMs!! >= 150 && it.internet2Ms!! < 150 }}, only 1.1.1.1 ${both.count { it.internetMs!! < 150 && it.internet2Ms!! >= 150 }}")
+            val spiky = i.samples.filter { (it.internetMs ?: 0.0) >= 150 }
+            appendLine("Spikes while the phone had other cellular traffic (>=200 kbps): ${spiky.count { it.otherKbps >= 200 }} of ${spiky.size}")
             summary("Tunnel via relay", i.tunnelRtt)
             appendLine()
             appendLine("== Tunnel round trips seen by the relay (ms, newest last) ==")
             appendLine(if (i.tunnelRtt.isEmpty()) "none" else i.tunnelRtt.joinToString(" ") { "%.0f".format(Locale.US, it) })
             appendLine()
-            appendLine("== Samples: time,screen,link_ms,internet_ms,relayed_kbps ==")
+            appendLine("== Samples: time,screen,link_ms,internet_ms,relayed_kbps,internet2_ms,other_kbps,signal_dbm ==")
             i.samples.forEach {
-                appendLine("${t(it.at)},${if (it.screenOn) "on" else "off"},${it.linkMs?.let { v -> "%.0f".format(Locale.US, v) } ?: ""},${it.internetMs?.let { v -> "%.0f".format(Locale.US, v) } ?: ""},${"%.0f".format(Locale.US, it.loadKbps)}")
+                appendLine("${t(it.at)},${if (it.screenOn) "on" else "off"},${it.linkMs?.let { v -> "%.0f".format(Locale.US, v) } ?: ""},${it.internetMs?.let { v -> "%.0f".format(Locale.US, v) } ?: ""},${"%.0f".format(Locale.US, it.loadKbps)},${it.internet2Ms?.let { v -> "%.0f".format(Locale.US, v) } ?: ""},${"%.0f".format(Locale.US, it.otherKbps)},${it.signalDbm ?: ""}")
             }
             appendLine()
             appendLine("== Events ==")
