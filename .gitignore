@@ -7,3 +7,4 @@ local.properties
 *.apk
 keystore.properties
 release.jks
+*.apk.sha256
