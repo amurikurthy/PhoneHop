@@ -5,9 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
-import android.os.PowerManager
 import android.os.Process
-import java.net.InetSocketAddress
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -25,11 +23,7 @@ import java.net.NetworkInterface
 object RelayRuntime {
     const val PORT = 51820
 
-    data class Event(val at: Long, val msg: String)
-
     val stats = RelayStats()
-    val latency = LatencyLog()
-    private val events = ArrayDeque<Event>()
     @Volatile var internetText: String = "no internet network"
     @Volatile var logSink: (String) -> Unit = {}
 
@@ -39,10 +33,8 @@ object RelayRuntime {
     private var cellularCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var cellular: Network? = null
     @Volatile private var pendingUpstream: String? = null
-    private var probe: LatencyProbe? = null
     private var powerReceiver: BroadcastReceiver? = null
     private var appContext: Context? = null
-    @Volatile private var internetTarget: InetSocketAddress? = null
     private var callback: ConnectivityManager.NetworkCallback? = null
     private var connectivity: ConnectivityManager? = null
 
@@ -67,7 +59,6 @@ object RelayRuntime {
                 network = n
                 event("Internet network available: ${cm.getNetworkCapabilities(n)?.let { describe(it) } ?: "?"}")
                 r.rebindUpstream() // the old socket belongs to the previous network
-                resolveInternetTarget(n)
             }
             override fun onLost(n: Network) {
                 if (network == n) { network = null; internetText = "no internet network"; event("Internet network lost") }
@@ -85,7 +76,6 @@ object RelayRuntime {
                 cellular = n
                 event("Cellular available; relay traffic uses it")
                 r.rebindUpstream()
-                resolveInternetTarget(n)
             }
             override fun onLost(n: Network) {
                 if (cellular == n) { cellular = null; event("Cellular lost"); r.rebindUpstream() }
@@ -117,20 +107,8 @@ object RelayRuntime {
         pendingUpstream?.let { runCatching { r.setUpstream(it, PORT) } }
         r.start()
         appContext = app
-        if (app.getSharedPreferences("phonehop", Context.MODE_PRIVATE).getBoolean("keep_warm", true)) setKeepWarm(true)
+        startKeepWarm()
         registerPowerEvents(app)
-        val pm = app.getSystemService(PowerManager::class.java)
-        probe = LatencyProbe(
-            routerHost = { if (linkAddress() != null) Link.ROUTER_IP else null },
-            internetNetwork = { upstreamNetwork() },
-            internetTarget = { internetTarget },
-            screenOn = { pm.isInteractive },
-            log = latency,
-            linkSocket = { linkNetwork()?.socketFactory?.createSocket() ?: java.net.Socket() },
-            loadKbps = ::currentLoadKbps,
-            internet2Target = { InetSocketAddress("1.1.1.1", 443) },
-            otherKbps = { lastOtherKbps },
-        ).also { it.start() }
         event("Relay started")
     }
 
@@ -143,65 +121,30 @@ object RelayRuntime {
         wifiCallback?.let { runCatching { connectivity?.unregisterNetworkCallback(it) } }
         wifiCallback = null
         callback = null
-        probe?.stop(); probe = null
         powerReceiver?.let { r -> runCatching { appContext?.unregisterReceiver(r) } }
         powerReceiver = null
+        keepWarm = false
         relay?.stop()
         relay = null
         network = null
     }
 
-    // ---------------------------------------------------------------- events and diagnostics
+    // ---------------------------------------------------------------- events
 
-    /** Logs a notable moment (screen, Doze, network, relay recovery) with the relay's state, so spikes can be lined up with causes. */
-    fun event(msg: String) {
-        synchronized(events) {
-            if (events.size >= 200) events.removeFirst()
-            events.addLast(Event(System.currentTimeMillis(), msg))
-        }
-        logSink(msg)
-    }
+    /** Logs a notable moment (link joined, network change, relay recovery) to the app's log. */
+    fun event(msg: String) = logSink(msg)
 
-    fun recentEvents(): List<Event> = synchronized(events) { events.toList() }
-
-    /** One line describing what the relay is doing right now. */
-    fun snapshotText(): String {
-        val now = System.currentTimeMillis()
-        fun ago(t: Long) = if (t == 0L) "never" else "${(now - t) / 1000}s ago"
-        return "relay up ${stats.fromRouter.get() / 1024} KB / down ${stats.toRouter.get() / 1024} KB, " +
-            "router ${ago(stats.lastFromRouterAt)}, server ${ago(stats.lastFromUpstreamAt)}, $internetText"
-    }
-
+    /** Warms both radios when the screen turns on or off or the phone is unlocked (Android re-tunes them then). */
     private fun registerPowerEvents(app: Context) {
-        val pm = app.getSystemService(PowerManager::class.java)
         val receiver = object : BroadcastReceiver() {
-            override fun onReceive(c: Context, i: Intent) {
-                val what = when (i.action) {
-                    Intent.ACTION_SCREEN_ON -> "Screen on"
-                    Intent.ACTION_SCREEN_OFF -> "Screen off"
-                    Intent.ACTION_USER_PRESENT -> "Unlocked"
-                    PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> "Doze ${if (pm.isDeviceIdleMode) "ON" else "off"}"
-                    PowerManager.ACTION_POWER_SAVE_MODE_CHANGED -> "Battery saver ${if (pm.isPowerSaveMode) "ON" else "off"}"
-                    else -> return
-                }
-                event("$what | ${snapshotText()}")
-                if (i.action == Intent.ACTION_SCREEN_ON || i.action == Intent.ACTION_SCREEN_OFF || i.action == Intent.ACTION_USER_PRESENT) warmBurst()
-            }
+            override fun onReceive(c: Context, i: Intent) = warmBurst()
         }
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_USER_PRESENT)
-            addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED); addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
         }
         if (Build.VERSION.SDK_INT >= 33) app.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         else app.registerReceiver(receiver, filter)
         powerReceiver = receiver
-    }
-
-    /** Looks up a Mullvad web server over the internet network, to measure the internet side of the path. */
-    private fun resolveInternetTarget(n: Network) {
-        Thread {
-            internetTarget = runCatching { InetSocketAddress(n.getByName("api.mullvad.net"), 443) }.getOrNull()
-        }.apply { isDaemon = true; start() }
     }
 
     /** Points the relay at a VPN server (an IPv4 address). Remembered if the relay is not running yet. */
@@ -212,7 +155,6 @@ object RelayRuntime {
 
     val isRunning get() = relay?.isRunning == true
 
-    /** The phone's own address on the router's link network, or null while it has not joined. */
     private var listenNetwork: Network? = null
     private var listenAddress: String? = null
 
@@ -230,6 +172,7 @@ object RelayRuntime {
         r.rebindListen()
     }
 
+    /** The phone's own address on the router's link network, or null while it has not joined. */
     fun linkAddress(): InetAddress? = runCatching {
         val base = InetAddress.getByName(Link.SUBNET)
         NetworkInterface.getNetworkInterfaces().toList().flatMap { it.interfaceAddresses }.map { it.address }
@@ -241,37 +184,37 @@ object RelayRuntime {
         return DatagramSocket().also { n.bindSocket(it) }
     }
 
-    // ---------------------------------------------------------------- keep the link awake (test)
+    // ---------------------------------------------------------------- keep the radios awake
 
     @Volatile private var keepWarm = false
     private var warmThread: Thread? = null
 
     /**
-     * Keeps the link awake: a one-byte packet to the router every 150 ms (so the phone's Wi-Fi never power-saves) and a
-     * one-byte packet to the VPN server about every 450 ms (so the cellular radio stays awake). Costs battery and about
-     * 150 MB of mobile data a month; for finding out whether idle radios are the latency problem.
+     * Keeps both radios out of their low-power states, where every packet waits for the radio to wake: a one-byte packet
+     * to the router every 150 ms (Wi-Fi) and one to the VPN server about every 450 ms (cellular). A packet is skipped
+     * whenever relayed traffic has just kept that radio busy anyway, so the cost is only paid while the link is quiet.
      */
     @Synchronized
-    fun setKeepWarm(on: Boolean) {
-        keepWarm = on
-        event("Keep link warm: ${if (on) "on" else "off"}")
-        if (!on || warmThread != null) return
+    private fun startKeepWarm() {
+        keepWarm = true
+        if (warmThread != null) return
         warmThread = Thread({
             var socket: DatagramSocket? = null
             val target = InetAddress.getByName(Link.ROUTER_IP)
             var tick = 0
             while (keepWarm) {
-                // Every 3rd tick (about 450 ms) also keep the cellular radio awake: with the screen off it sleeps within
-                // a second or two, and each packet then waits about half a second for it to wake.
-                if (tick++ % 3 == 0) relay?.poke()
-                try {
-                    if (socket == null) {
-                        val n = linkNetwork()
-                        if (n != null) socket = DatagramSocket().also { n.bindSocket(it) }
+                val sinceTraffic = System.currentTimeMillis() - maxOf(stats.lastFromRouterAt, stats.lastFromUpstreamAt)
+                if (tick++ % 3 == 0 && sinceTraffic > 300) relay?.poke()
+                if (sinceTraffic > 100) {
+                    try {
+                        if (socket == null) {
+                            val n = linkNetwork()
+                            if (n != null) socket = DatagramSocket().also { n.bindSocket(it) }
+                        }
+                        socket?.send(java.net.DatagramPacket(ByteArray(1), 1, target, 9))
+                    } catch (e: Exception) {
+                        runCatching { socket?.close() }; socket = null
                     }
-                    socket?.send(java.net.DatagramPacket(ByteArray(1), 1, target, 9))
-                } catch (e: Exception) {
-                    runCatching { socket?.close() }; socket = null
                 }
                 try { Thread.sleep(150) } catch (e: InterruptedException) { break }
             }
@@ -283,7 +226,7 @@ object RelayRuntime {
     /**
      * A short rush of tiny packets to the router and to the VPN server. Android re-tunes the Wi-Fi and cellular radios
      * when the screen turns on or off, and a packet caught in that moment can wait several hundred milliseconds; this wakes
-     * both radios first. Does nothing when keep-warm is off.
+     * both radios first.
      */
     private fun warmBurst() {
         if (!keepWarm) return
@@ -303,26 +246,6 @@ object RelayRuntime {
                 runCatching { socket?.close() }
             }
         }, "warm-burst").apply { isDaemon = true; start() }
-    }
-
-    private var loadBytes = 0L
-    private var loadAt = 0L
-    private var mobileBytes = 0L
-    @Volatile private var lastOtherKbps = 0.0
-
-    /** Relayed kilobits per second since the previous call (both directions). */
-    @Synchronized
-    private fun currentLoadKbps(): Double {
-        val now = System.currentTimeMillis()
-        val bytes = stats.fromRouter.get() + stats.toRouter.get()
-        val kbps = if (loadAt == 0L || now <= loadAt) 0.0 else (bytes - loadBytes) * 8.0 / (now - loadAt)
-        // Everything else on the phone's cellular connection: its total minus what the relay carried (plus ~5% for headers).
-        val mobile = android.net.TrafficStats.getMobileRxBytes().coerceAtLeast(0) + android.net.TrafficStats.getMobileTxBytes().coerceAtLeast(0)
-        lastOtherKbps = if (loadAt == 0L || now <= loadAt || mobileBytes == 0L) 0.0
-            else maxOf(0.0, (mobile - mobileBytes) * 8.0 / (now - loadAt) - kbps * 1.05)
-        mobileBytes = mobile
-        loadBytes = bytes; loadAt = now
-        return kbps
     }
 
     /** The Wi-Fi network that carries the router link, so sockets to the router are routed over it. */

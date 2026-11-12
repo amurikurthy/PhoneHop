@@ -62,11 +62,8 @@ class MainActivity : Activity() {
     private lateinit var wifiPanel: TrafficPanel
     private lateinit var cellPanel: TrafficPanel
     private lateinit var relayPanel: TrafficPanel
-    private lateinit var latencyPanel: TrafficPanel
-    private lateinit var latencySummary: TextView
     private lateinit var batteryNote: TextView
     private lateinit var batteryButton: View
-    private var lastLatencyAt = 0L
     private val profiles by lazy { ProfileStore(PrefsKeyValueStore(prefs)) }
     private lateinit var wizard: RouterWizard
     private var lastLinkUp = false
@@ -89,18 +86,15 @@ class MainActivity : Activity() {
             cellPanel.update(s.cellDown, s.cellUp)
             relayPanel.update(s.relayDown, s.relayUp)
             updateRelayStatus()
-            updateLatency()
             updateLinkStatus()
             updateStatusCard()
         }
         RelayRuntime.logSink = ::log
-        // Settings left over from the old Wi-Fi Direct design.
-        prefs.edit().remove("p2p_suffix").remove("p2p_pass").remove("p2p_band").apply()
+        // Settings left over from the old Wi-Fi Direct design and from the removed latency experiments.
+        prefs.edit().remove("p2p_suffix").remove("p2p_pass").remove("p2p_band").remove("keep_warm").remove("wifi_lock_mode").apply()
         setContentView(buildUi())
         log("PhoneHop ${versionName()} on Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), ${Build.MANUFACTURER} ${Build.MODEL}")
         Updater.statusListener = { msg -> setUpdateStatus(msg) }
-        // Replay what happened while the screen was away (screen off, Doze, network changes...).
-        RelayRuntime.recentEvents().takeLast(60).forEach { logAt(it.at, it.msg) }
         requestPermissionsThenStart()
         // Only on a fresh launch, not on rotation, so we don't re-check repeatedly.
         if (savedInstanceState == null && prefs.getBoolean("auto_update", true)) checkForUpdates(auto = true)
@@ -108,7 +102,6 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
-        RelayRuntime.event("App in foreground | ${RelayRuntime.snapshotText()}")
         LinkRuntime.start(applicationContext)
         applyLinkSoon(500)
         updateBatteryUi()
@@ -116,8 +109,7 @@ class MainActivity : Activity() {
     }
 
     override fun onStop() {
-        // Only the screen's own sampling stops; the group, relay and probes belong to the service.
-        RelayRuntime.event("App in background | ${RelayRuntime.snapshotText()}")
+        // Only the screen's own sampling stops; the relay belongs to the service.
         monitor.stop()
         super.onStop()
     }
@@ -279,32 +271,15 @@ class MainActivity : Activity() {
             ), ui.cardParams()
         )
 
-        // ---- Link quality
-        latencyPanel = TrafficPanel(
-            this, "Latency", floor = 20f, format = LatencyStats::format, downLabel = "link", upLabel = "internet",
-        )
-        latencySummary = ui.mono("Measuring...", 11f)
+        // ---- Background use
         batteryNote = ui.caption("")
         batteryButton = ui.secondary("Allow background use") { requestBatteryExemption() }
-        val lockSegmented = ui.segmented(WifiLockMode.values().map { it.label }, WifiLockMode.fromPrefs(prefs).ordinal) {
-            prefs.edit().putInt(WifiLockMode.PREF, it).apply()
-            KeepAliveService.applyWifiLockChoice(this)
-        }
         place(
             ui.collapsible(
-                "Link quality",
-                "Round-trip time to the router over the link network (link) and to Mullvad over the phone's internet (internet), measured every 2 seconds, even with the screen off.",
-                latencyPanel,
-                latencySummary,
-                ui.labeled("Wi-Fi lock", lockSegmented, "Keeps the phone's Wi-Fi radio from power-saving. Try each and watch the graph; Low latency only works with the screen on."),
-                ui.toggle("Keep link and cellular warm", prefs.getBoolean("keep_warm", true)) { on ->
-                    prefs.edit().putBoolean("keep_warm", on).apply()
-                    RelayRuntime.setKeepWarm(on)
-                },
-                ui.caption("Keeps both radios awake with tiny packets: to the router every 150 ms and to the Mullvad server about every half second. Uses more battery and roughly 150 MB of mobile data a month. Turn it on while pinging from a laptop to see whether the delay swings disappear."),
+                "Background use",
+                "To keep latency low the app holds the phone's Wi-Fi out of power-save and sends tiny packets (to the router and to the Mullvad server) only while the link is quiet. Normal traffic keeps the radios awake by itself.",
                 batteryNote,
                 batteryButton,
-                ui.secondary("Clear stats") { RelayRuntime.latency.clear(); RelayRuntime.stats.rtt.clear(); RelayRuntime.stats.maxForwardUs.set(0); latencySummary.text = "Measuring..." },
             ), ui.cardParams()
         )
 
@@ -388,7 +363,7 @@ class MainActivity : Activity() {
         // ---- Log
         logView = ui.mono("", 11f)
         place(
-            ui.collapsible("Log", "Share diagnostics sends a detailed report (latency samples, relay counters, screen and network events) to any app you choose. It never contains your account number, passwords or keys.", logView, ui.secondary("Share diagnostics") { shareDiagnostics() }, ui.secondary("Clear log") { logView.text = "" }),
+            ui.collapsible("Log", "Recent events: link, network and relay changes. Nothing here contains your account number, passwords or keys.", logView, ui.secondary("Clear log") { logView.text = "" }),
             ui.cardParams()
         )
 
@@ -663,62 +638,6 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- Mullvad account
 
-    /** Builds the detailed report, keeps a copy in the app's files, and opens the share sheet. */
-    private fun shareDiagnostics() {
-        val st = RelayRuntime.stats
-        val now = System.currentTimeMillis()
-        fun ago(t: Long) = if (t == 0L) "never" else "${(now - t) / 1000}s ago"
-        val pm = getSystemService(PowerManager::class.java)
-        val report = DiagnosticsReport.build(
-            DiagnosticsReport.In(
-                version = versionName(),
-                device = "${Build.MANUFACTURER} ${Build.MODEL}",
-                android = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
-                nowMillis = now,
-                settings = listOf(
-                    "Server" to (selectedRelay?.let { "${it.hostname} ${it.ipv4}" } ?: "none"),
-                    "Server selection" to if (prefs.getBoolean(PREF_AUTO, true)) "auto" else "manual",
-                    "Wi-Fi lock" to WifiLockMode.fromPrefs(prefs).label,
-                    "Keep warm" to prefs.getBoolean("keep_warm", true).toString(),
-                    "Link network" to (ssidField.text.toString()),
-                    "Router paired" to (profiles.active()?.title ?: "no"),
-                ),
-                state = listOf(
-                    "Link address" to (RelayRuntime.linkAddress()?.hostAddress ?: "not joined"),
-                    "Relay listening" to (st.listening ?: "no"),
-                    "Router seen at" to (st.routerAddress?.let { "${it.address.hostAddress}:${it.port}" } ?: "never"),
-                    "Router last packet" to ago(st.lastFromRouterAt),
-                    "Server last reply" to ago(st.lastFromUpstreamAt),
-                    "Relayed up/down" to "${st.fromRouter.get()} / ${st.toRouter.get()} bytes",
-                    "Dropped / send errors" to "${st.dropped.get()} / ${st.sendErrors.get()}",
-                    "Dropped by reason" to "bad sender ${st.dropBadSender.get()}, not WireGuard ${st.dropNotWireGuard.get()}, no route ${st.dropNoRoute.get()}, wrong server ${st.dropWrongServer.get()}",
-                    "Socket re-opens (upstream/listener)" to "${st.upstreamRebinds.get()} / ${st.listenRebinds.get()}",
-                    "Relay forwarding, slowest" to "${st.maxForwardUs.get() / 1000.0} ms",
-                    "Internet network" to RelayRuntime.internetText,
-                    "Screen interactive" to pm.isInteractive.toString(),
-                    "Doze" to pm.isDeviceIdleMode.toString(),
-                    "Battery saver" to pm.isPowerSaveMode.toString(),
-                    "Battery unrestricted" to pm.isIgnoringBatteryOptimizations(packageName).toString(),
-                ),
-                samples = RelayRuntime.latency.snapshot(),
-                tunnelRtt = st.rtt.since(0),
-                events = RelayRuntime.recentEvents().map { it.at to it.msg },
-                log = logView.text.toString(),
-            )
-        )
-        runCatching { java.io.File(filesDir, "diagnostics-${now / 1000}.txt").writeText(report) }
-        log("Diagnostics report built (${report.length / 1024} KB)")
-        startActivity(
-            android.content.Intent.createChooser(
-                android.content.Intent(android.content.Intent.ACTION_SEND)
-                    .setType("text/plain")
-                    .putExtra(android.content.Intent.EXTRA_SUBJECT, "PhoneHop diagnostics")
-                    .putExtra(android.content.Intent.EXTRA_TEXT, report),
-                "Share diagnostics"
-            )
-        )
-    }
-
     private fun updateStatusCard() {
         val st = RelayRuntime.stats
         val heard = if (st.lastFromRouterAt == 0L) null else (System.currentTimeMillis() - st.lastFromRouterAt) / 1000
@@ -732,36 +651,6 @@ class MainActivity : Activity() {
                 relayedBytes = st.fromRouter.get() + st.toRouter.get(),
             )
         )
-    }
-
-    private fun updateLatency() {
-        val all = RelayRuntime.latency.snapshot()
-        val last = all.lastOrNull() ?: return
-        if (last.at != lastLatencyAt) {
-            lastLatencyAt = last.at
-            latencyPanel.update(last.linkMs ?: 0.0, last.internetMs ?: 0.0)
-        }
-        val cutoff = System.currentTimeMillis() - 10 * 60_000L
-        val recent = all.filter { it.at >= cutoff }
-        fun row(label: String, values: List<Double>): String {
-            val m = LatencyStats.summarize(values) ?: return "%-17s %s".format(Locale.US, label, "no data")
-            return "%-17s %6s %6s %7s %4d".format(
-                Locale.US, label, LatencyStats.format(m.p50), LatencyStats.format(m.p95), LatencyStats.format(m.max), m.spikes
-            )
-        }
-        latencySummary.text = buildString {
-            appendLine("10 min             p50    p95    max  n>150")
-            appendLine(row("Link, screen on", recent.filter { it.screenOn }.mapNotNull { it.linkMs }))
-            appendLine(row("Link, screen off", recent.filter { !it.screenOn }.mapNotNull { it.linkMs }))
-            appendLine(row("Internet, on", recent.filter { it.screenOn }.mapNotNull { it.internetMs }))
-            appendLine(row("Internet, off", recent.filter { !it.screenOn }.mapNotNull { it.internetMs }))
-            appendLine(row("Internet, idle", recent.filter { it.loadKbps < IDLE_KBPS }.mapNotNull { it.internetMs }))
-            appendLine(row("Internet, loaded", recent.filter { it.loadKbps >= IDLE_KBPS }.mapNotNull { it.internetMs }))
-            appendLine(row("Internet, 1.1.1.1", recent.mapNotNull { it.internet2Ms }))
-            appendLine(row("Tunnel via relay", RelayRuntime.stats.rtt.since(cutoff)))
-            append("Relay forwarding: slowest ${"%.1f".format(Locale.US, RelayRuntime.stats.maxForwardUs.get() / 1000.0)} ms")
-            append("\n(spikes are readings of 150 ms or more)")
-        }
     }
 
     private fun updateBatteryUi() {
@@ -847,8 +736,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_ALL = 1
-        /** Below this much relayed traffic the link counts as idle. */
-        private const val IDLE_KBPS = 200.0
         private const val PREF_SSID = "link_ssid"
         private const val PREF_PASS = "link_pass"
         private const val PREF_AUTO = "server_auto"

@@ -9,14 +9,6 @@ import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
-/** Recent round-trip times (milliseconds) as the relay sees them: a packet forwarded to the server until its answer returns. */
-class RttLog(private val capacity: Int = 900) {
-    private val items = ArrayDeque<Pair<Long, Double>>()
-    @Synchronized fun add(ms: Double) { if (items.size >= capacity) items.removeFirst(); items.addLast(System.currentTimeMillis() to ms) }
-    @Synchronized fun since(at: Long): List<Double> = items.filter { it.first >= at }.map { it.second }
-    @Synchronized fun clear() = items.clear()
-}
-
 /** What the relay has done; read by the UI once a second for the graph and status line. */
 class RelayStats {
     /** Bytes received from the router (heading to the VPN server). */
@@ -24,14 +16,6 @@ class RelayStats {
     /** Bytes received from the VPN server (heading to the router). */
     val toRouter = AtomicLong()
     val dropped = AtomicLong()
-    /** Why packets were dropped (each also counts in [dropped]). */
-    val dropBadSender = AtomicLong()      // from the router side but not an allowed sender
-    val dropNotWireGuard = AtomicLong()   // wrong shape for a WireGuard message
-    val dropNoRoute = AtomicLong()        // nowhere to send it yet (no server, socket being re-opened, router unknown)
-    val dropWrongServer = AtomicLong()    // arrived on the upstream socket from something other than the server
-    /** Tunnel round trips seen by the relay, and the slowest time (microseconds) it took to forward one packet. */
-    val rtt = RttLog()
-    val maxForwardUs = AtomicLong()
     /** Send failures, and how often the sockets were re-opened to recover from a stall. */
     val sendErrors = AtomicLong()
     val upstreamRebinds = AtomicLong()
@@ -94,9 +78,7 @@ class Relay(
     private val sentSinceReply = AtomicLong()
     private val receivedSinceRouterPacket = AtomicLong()
     @Volatile private var lastUpstreamHeal = 0L
-    @Volatile private var awaitingSince = 0L // nanoTime of the oldest packet sent to the server with no answer yet
     @Volatile private var lastListenHeal = 0L
-    @Volatile private var lastReplyNs = System.nanoTime() - 10_000_000_000L
 
     /** Actual bound port once listening, else -1. */
     val localPort: Int get() = listenSocket?.localPort ?: -1
@@ -183,13 +165,14 @@ class Relay(
     }
 
     private fun onFromRouter(p: DatagramPacket) {
-        val startedNs = System.nanoTime()
         val src = InetSocketAddress(p.address, p.port)
-        if (!allowedSource(p.address)) { stats.dropped.incrementAndGet(); stats.dropBadSender.incrementAndGet(); return }
-        if (!WireGuardPacket.isValid(p.data, p.length)) { stats.dropped.incrementAndGet(); stats.dropNotWireGuard.incrementAndGet(); return }
+        if (!allowedSource(p.address) || !WireGuardPacket.isValid(p.data, p.length)) {
+            stats.dropped.incrementAndGet()
+            return
+        }
         val target = upstream
         val up = upstreamSocket
-        if (target == null || up == null) { stats.dropped.incrementAndGet(); stats.dropNoRoute.incrementAndGet(); return }
+        if (target == null || up == null) { stats.dropped.incrementAndGet(); return }
         if (stats.routerAddress != src) {
             stats.routerAddress = src
             log("Router seen at ${src.address.hostAddress}:${src.port}")
@@ -200,10 +183,6 @@ class Relay(
         sentSinceReply.addAndGet(p.length.toLong())
         try {
             up.send(DatagramPacket(p.data, p.length, target))
-            // Only time a round trip that starts from quiet; under streaming, replies belong to older packets.
-            if (awaitingSince == 0L && startedNs - lastReplyNs > 1_000_000_000L) awaitingSince = startedNs
-            val tookUs = (System.nanoTime() - startedNs) / 1_000
-            stats.maxForwardUs.accumulateAndGet(tookUs) { a, b -> maxOf(a, b) }
         } catch (e: Exception) {
             stats.dropped.incrementAndGet()
             stats.sendErrors.incrementAndGet()
@@ -241,18 +220,14 @@ class Relay(
         val expected = upstream
         if (expected == null || p.address != expected.address || p.port != expected.port) {
             stats.dropped.incrementAndGet() // not from our server
-            stats.dropWrongServer.incrementAndGet()
             return
         }
-        if (!WireGuardPacket.isValid(p.data, p.length)) { stats.dropped.incrementAndGet(); stats.dropNotWireGuard.incrementAndGet(); return }
+        if (!WireGuardPacket.isValid(p.data, p.length)) { stats.dropped.incrementAndGet(); return }
         val router = stats.routerAddress
         val out = listenSocket
-        if (router == null || out == null) { stats.dropped.incrementAndGet(); stats.dropNoRoute.incrementAndGet(); return }
+        if (router == null || out == null) { stats.dropped.incrementAndGet(); return }
         stats.lastFromUpstreamAt = System.currentTimeMillis()
         stats.toRouter.addAndGet(p.length.toLong())
-        lastReplyNs = System.nanoTime()
-        val since = awaitingSince
-        if (since != 0L) { awaitingSince = 0L; stats.rtt.add((System.nanoTime() - since) / 1_000_000.0) }
         sentSinceReply.set(0)
         receivedSinceRouterPacket.addAndGet(p.length.toLong())
         try {

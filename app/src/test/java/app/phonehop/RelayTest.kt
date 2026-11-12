@@ -190,19 +190,6 @@ class RelayTest {
         assertTrue(before > 0)
     }
 
-    @Test fun measuresTheTunnelRoundTripAndForwardingTime() {
-        sendToRelay(router, wgData(100))
-        val seen = receive(server)
-        Thread.sleep(60) // the "server" takes a while to answer
-        val reply = wgData(80)
-        server.send(DatagramPacket(reply, reply.size, seen.address, seen.port))
-        receive(router)
-        val rtts = relay.stats.rtt.since(0)
-        assertEquals(1, rtts.size)
-        assertTrue("rtt ${rtts[0]}", rtts[0] in 50.0..500.0)
-        assertTrue(relay.stats.maxForwardUs.get() in 0..200_000)
-    }
-
     // ---- self-heal watchdog (fast timings so the tests are quick)
     private fun healingRelay(): Relay = Relay(
         { loopback }, 0, { true }, { DatagramSocket(0, loopback) },
