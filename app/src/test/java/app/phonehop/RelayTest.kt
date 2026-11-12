@@ -189,4 +189,40 @@ class RelayTest {
         assertEquals(100, receive(server).length)
         assertTrue(before > 0)
     }
+
+    // ---- self-heal watchdog (fast timings so the tests are quick)
+    private fun healingRelay(): Relay = Relay(
+        { loopback }, 0, { true }, { DatagramSocket(0, loopback) },
+        healBytes = 500, healSilenceMs = 300, healCooldownMs = 300, watchdogTickMs = 50,
+    ).also { it.setUpstream("127.0.0.1", server.localPort); it.start(); await { it.localPort > 0 && it.upstreamLocalPort > 0 } }
+
+    @Test fun aStuckUpstreamSocketIsReopened() {
+        val r = healingRelay()
+        val before = r.upstreamLocalPort
+        repeat(10) { router.send(DatagramPacket(wgData(100), 100, loopback, r.localPort)); Thread.sleep(5) }
+        // The server never answers.
+        await { r.upstreamLocalPort > 0 && r.upstreamLocalPort != before }
+        assertTrue(r.stats.upstreamRebinds.get() >= 1)
+        r.stop()
+    }
+
+    @Test fun aQuietTunnelIsNeverRebound() {
+        val r = healingRelay()
+        val before = r.upstreamLocalPort
+        repeat(10) { router.send(DatagramPacket(wgData(32), 32, loopback, r.localPort)); Thread.sleep(80) } // keepalives only
+        assertEquals(before, r.upstreamLocalPort)
+        assertEquals(0L, r.stats.upstreamRebinds.get())
+        assertEquals(0L, r.stats.listenRebinds.get())
+        r.stop()
+    }
+
+    @Test fun aSilentRouterGetsTheListenerReopened() {
+        val r = healingRelay()
+        router.send(DatagramPacket(wgData(100), 100, loopback, r.localPort)) // router speaks once, so its address is learned
+        val seen = receive(server)
+        repeat(10) { server.send(DatagramPacket(wgData(100), 100, seen.address, seen.port)); Thread.sleep(5) }
+        // ...and then says nothing while the server keeps sending
+        await { r.stats.listenRebinds.get() >= 1 }
+        r.stop()
+    }
 }

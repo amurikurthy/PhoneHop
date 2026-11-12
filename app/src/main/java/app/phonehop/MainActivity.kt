@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.Process
 import android.util.Base64
 import android.view.View
@@ -42,7 +43,6 @@ class MainActivity : Activity() {
     private val secrets by lazy {
         SecretStore(PrefsKeyValueStore(getSharedPreferences("phonehop_secrets", MODE_PRIVATE)), KeystoreCipher())
     }
-    private lateinit var p2p: WifiDirectController
     private lateinit var monitor: TrafficMonitor
 
     private lateinit var scroll: ScrollView
@@ -61,6 +61,11 @@ class MainActivity : Activity() {
     private lateinit var wifiPanel: TrafficPanel
     private lateinit var cellPanel: TrafficPanel
     private lateinit var relayPanel: TrafficPanel
+    private lateinit var latencyPanel: TrafficPanel
+    private lateinit var latencySummary: TextView
+    private lateinit var batteryNote: TextView
+    private lateinit var batteryButton: View
+    private var lastLatencyAt = 0L
     private val profiles by lazy { ProfileStore(PrefsKeyValueStore(prefs)) }
     private lateinit var wizard: RouterWizard
     private lateinit var lockNote: TextView
@@ -83,7 +88,6 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false)
-        p2p = WifiDirectController(this, ::log, ::showGroup)
         monitor = TrafficMonitor(
             relayTotals = { Pair(RelayRuntime.stats.toRouter.get(), RelayRuntime.stats.fromRouter.get()) }
         ) { s ->
@@ -91,11 +95,15 @@ class MainActivity : Activity() {
             cellPanel.update(s.cellDown, s.cellUp)
             relayPanel.update(s.relayDown, s.relayUp)
             updateRelayStatus()
+            updateLatency()
         }
         RelayRuntime.logSink = ::log
         setContentView(buildUi())
         log("PhoneHop ${versionName()} on Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), ${Build.MANUFACTURER} ${Build.MODEL}")
         Updater.statusListener = { msg -> setUpdateStatus(msg) }
+        // Replay what happened while the screen was away (screen off, Doze, network changes...).
+        RelayRuntime.recentEvents().takeLast(60).forEach { logAt(it.at, it.msg) }
+        GroupRuntime.setListener(::showGroup)
         requestPermissionsThenStart()
         // Only on a fresh launch, not on rotation, so we don't re-check repeatedly.
         if (savedInstanceState == null && prefs.getBoolean("auto_update", true)) checkForUpdates(auto = true)
@@ -103,19 +111,22 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
-        if (hasP2pPermission()) { p2p.start(); p2p.refresh(); applyGroupSoon(500) }
+        RelayRuntime.event("App in foreground | ${RelayRuntime.snapshotText()}")
+        if (hasP2pPermission()) { GroupRuntime.start(applicationContext); GroupRuntime.refresh(); applyGroupSoon(500) }
+        updateBatteryUi()
         monitor.start()
     }
 
     override fun onStop() {
-        // Receiver and sampling only; the group and the service live on while the process does.
-        p2p.stop()
+        // Only the screen's own sampling stops; the group, relay and probes belong to the service.
+        RelayRuntime.event("App in background | ${RelayRuntime.snapshotText()}")
         monitor.stop()
         super.onStop()
     }
 
     override fun onDestroy() {
         Updater.statusListener = null
+        GroupRuntime.setListener(null)
         RelayRuntime.logSink = {}
         super.onDestroy()
     }
@@ -142,7 +153,7 @@ class MainActivity : Activity() {
     }
 
     private fun onPermissionsSettled() {
-        if (hasP2pPermission()) { p2p.start(); applyGroupSoon(300) }
+        if (hasP2pPermission()) { GroupRuntime.start(applicationContext); applyGroupSoon(300) }
         // Always on: this is what keeps the Wi-Fi Direct group alive with the screen off.
         KeepAliveService.start(this)
         fetchServers()
@@ -160,7 +171,7 @@ class MainActivity : Activity() {
     /** Removes the group, stops the service (clearing its notification) and closes the app completely. */
     private fun quit() {
         log("Quitting: removing Wi-Fi Direct group and stopping background service")
-        p2p.removeGroup {
+        GroupRuntime.removeGroup {
             KeepAliveService.stop(this)
             monitor.stop()
             finishAndRemoveTask()
@@ -290,6 +301,30 @@ class MainActivity : Activity() {
             ), ui.cardParams()
         )
 
+        // ---- Link quality
+        latencyPanel = TrafficPanel(
+            this, "Latency", floor = 20f, format = LatencyStats::format, downLabel = "link", upLabel = "internet",
+        )
+        latencySummary = ui.mono("Measuring...", 11f)
+        batteryNote = ui.caption("")
+        batteryButton = ui.secondary("Allow background use") { requestBatteryExemption() }
+        val lockSegmented = ui.segmented(WifiLockMode.values().map { it.label }, WifiLockMode.fromPrefs(prefs).ordinal) {
+            prefs.edit().putInt(WifiLockMode.PREF, it).apply()
+            KeepAliveService.applyWifiLockChoice(this)
+        }
+        content.addView(
+            ui.card(
+                "Link quality",
+                "Round-trip time to the router over Wi-Fi Direct (link) and to Mullvad over the phone's internet (internet), measured every 2 seconds, even with the screen off.",
+                latencyPanel,
+                latencySummary,
+                ui.labeled("Wi-Fi lock", lockSegmented, "Keeps the phone's Wi-Fi radio from power-saving. Try each and watch the graph; Low latency only works with the screen on."),
+                batteryNote,
+                batteryButton,
+                ui.secondary("Clear stats") { RelayRuntime.latency.clear(); latencySummary.text = "Measuring..." },
+            ), ui.cardParams()
+        )
+
         // ---- Live traffic
         wifiPanel = TrafficPanel(this, "Wi-Fi + Wi-Fi Direct")
         cellPanel = TrafficPanel(this, "Cellular")
@@ -403,6 +438,9 @@ class MainActivity : Activity() {
 
         updateAccountSavedUi()
 
+        // The page itself takes initial focus, so no text view (the log, a field) grabs it and scrolls the page.
+        content.isFocusable = true
+        content.isFocusableInTouchMode = true
         scroll = ScrollView(this).apply {
             isVerticalScrollBarEnabled = false
             addView(content, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -435,6 +473,7 @@ class MainActivity : Activity() {
                 if (newFocus is EditText) scroll.postDelayed({ ensureVisible(newFocus) }, 250)
             }
         }
+        content.post { content.requestFocus() }
         return root
     }
 
@@ -504,8 +543,13 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun log(msg: String) = runOnUiThread {
-        logView.append("${timeFmt.format(Date())}  $msg\n")
+    private fun log(msg: String) = logAt(System.currentTimeMillis(), msg)
+
+    private fun logAt(at: Long, msg: String) = runOnUiThread {
+        logView.append("${timeFmt.format(Date(at))}  $msg\n")
+        // Keep the log from growing without bound.
+        val t = logView.text
+        if (t.length > 40_000) logView.text = t.subSequence(t.length - 30_000, t.length)
     }
 
     // ---------------------------------------------------------------- Wi-Fi Direct
@@ -521,15 +565,14 @@ class MainActivity : Activity() {
 
     private fun applyGroupNow() {
         if (!hasP2pPermission()) { groupStatus.text = "Allow nearby devices access to create the network."; return }
-        p2p.start()
+        GroupRuntime.start(applicationContext)
         val band = WifiDirectController.Band.values()[bandIndex]
-        val problem = p2p.ensureGroup(suffixField.text.toString().trim(), passField.text.toString(), band)
+        val problem = GroupRuntime.ensure(suffixField.text.toString().trim(), passField.text.toString(), band)
         if (problem != null) groupStatus.text = problem
         else if (groupStatus.text.isNullOrBlank() || groupStatus.text == "No group.") groupStatus.text = "Starting the network..."
     }
 
     private fun showGroup(group: WifiP2pGroup?) = runOnUiThread {
-        RelayRuntime.setGroupInterface(group?.`interface`)
         val up = group != null
         if (up != groupUp) { groupUp = up; if (::wizard.isInitialized) wizard.render() }
         if (group == null) { groupStatus.text = "No group."; return@runOnUiThread }
@@ -681,6 +724,45 @@ class MainActivity : Activity() {
     }
 
     // ---------------------------------------------------------------- Mullvad account
+
+    private fun updateLatency() {
+        val all = RelayRuntime.latency.snapshot()
+        val last = all.lastOrNull() ?: return
+        if (last.at != lastLatencyAt) {
+            lastLatencyAt = last.at
+            latencyPanel.update(last.linkMs ?: 0.0, last.internetMs ?: 0.0)
+        }
+        val cutoff = System.currentTimeMillis() - 10 * 60_000L
+        val recent = all.filter { it.at >= cutoff }
+        fun row(label: String, values: List<Double>): String {
+            val m = LatencyStats.summarize(values) ?: return "%-17s %s".format(Locale.US, label, "no data")
+            return "%-17s %6s %6s %7s %4d".format(
+                Locale.US, label, LatencyStats.format(m.p50), LatencyStats.format(m.p95), LatencyStats.format(m.max), m.spikes
+            )
+        }
+        latencySummary.text = buildString {
+            appendLine("Last 10 min         p50    p95     max spikes")
+            appendLine(row("Link, screen on", recent.filter { it.screenOn }.mapNotNull { it.linkMs }))
+            appendLine(row("Link, screen off", recent.filter { !it.screenOn }.mapNotNull { it.linkMs }))
+            appendLine(row("Internet, on", recent.filter { it.screenOn }.mapNotNull { it.internetMs }))
+            append(row("Internet, off", recent.filter { !it.screenOn }.mapNotNull { it.internetMs }))
+            append("\n(spikes are readings of 150 ms or more)")
+        }
+    }
+
+    private fun updateBatteryUi() {
+        val ok = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+        batteryNote.text = if (ok) "Battery: unrestricted, so Android will not throttle the relay in the background."
+        else "Battery: restricted. Android may delay the relay's network access when the screen is off."
+        batteryButton.visibility = if (ok) View.GONE else View.VISIBLE
+    }
+
+    private fun requestBatteryExemption() {
+        startActivity(
+            android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                .setData(android.net.Uri.parse("package:$packageName"))
+        )
+    }
 
     private fun updateAccountSavedUi() {
         val saved = runCatching { secrets.account() }.getOrNull() != null

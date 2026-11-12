@@ -1,6 +1,13 @@
 package app.phonehop
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
+import android.os.PowerManager
+import android.os.Process
+import java.net.InetSocketAddress
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -19,7 +26,11 @@ object RelayRuntime {
     const val PORT = 51820
     private const val FALLBACK_GO = "192.168.49.1"
 
+    data class Event(val at: Long, val msg: String)
+
     val stats = RelayStats()
+    val latency = LatencyLog()
+    private val events = ArrayDeque<Event>()
     @Volatile var internetText: String = "no internet network"
     @Volatile var logSink: (String) -> Unit = {}
 
@@ -27,6 +38,10 @@ object RelayRuntime {
     @Volatile private var network: Network? = null
     @Volatile private var groupInterface: String? = null
     @Volatile private var pendingUpstream: String? = null
+    private var probe: LatencyProbe? = null
+    private var powerReceiver: BroadcastReceiver? = null
+    private var appContext: Context? = null
+    @Volatile private var internetTarget: InetSocketAddress? = null
     private var callback: ConnectivityManager.NetworkCallback? = null
     private var connectivity: ConnectivityManager? = null
 
@@ -42,15 +57,18 @@ object RelayRuntime {
             allowedSource = { a -> groupAddress()?.let { (base, prefix) -> Subnet.contains(base, prefix, a) } ?: false },
             openUpstream = { openUpstreamSocket() },
             stats = stats,
-            log = { logSink(it) },
+            log = { event(it) },
+            threadSetup = { runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY) } },
         )
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(n: Network) {
                 network = n
+                event("Internet network available: ${cm.getNetworkCapabilities(n)?.let { describe(it) } ?: "?"}")
                 r.rebindUpstream() // the old socket belongs to the previous network
+                resolveInternetTarget(n)
             }
             override fun onLost(n: Network) {
-                if (network == n) { network = null; internetText = "no internet network" }
+                if (network == n) { network = null; internetText = "no internet network"; event("Internet network lost") }
             }
             override fun onCapabilitiesChanged(n: Network, c: NetworkCapabilities) {
                 if (n == network) internetText = describe(c)
@@ -64,15 +82,81 @@ object RelayRuntime {
         }
         pendingUpstream?.let { runCatching { r.setUpstream(it, PORT) } }
         r.start()
+        appContext = app
+        registerPowerEvents(app)
+        val pm = app.getSystemService(PowerManager::class.java)
+        probe = LatencyProbe(
+            routerHost = { stats.routerAddress?.address?.hostAddress },
+            internetNetwork = { network },
+            internetTarget = { internetTarget },
+            screenOn = { pm.isInteractive },
+            log = latency,
+        ).also { it.start() }
+        event("Relay started")
     }
 
     @Synchronized
     fun stop() {
         callback?.let { runCatching { connectivity?.unregisterNetworkCallback(it) } }
         callback = null
+        probe?.stop(); probe = null
+        powerReceiver?.let { r -> runCatching { appContext?.unregisterReceiver(r) } }
+        powerReceiver = null
         relay?.stop()
         relay = null
         network = null
+    }
+
+    // ---------------------------------------------------------------- events and diagnostics
+
+    /** Logs a notable moment (screen, Doze, network, relay recovery) with the relay's state, so spikes can be lined up with causes. */
+    fun event(msg: String) {
+        synchronized(events) {
+            if (events.size >= 200) events.removeFirst()
+            events.addLast(Event(System.currentTimeMillis(), msg))
+        }
+        logSink(msg)
+    }
+
+    fun recentEvents(): List<Event> = synchronized(events) { events.toList() }
+
+    /** One line describing what the relay is doing right now. */
+    fun snapshotText(): String {
+        val now = System.currentTimeMillis()
+        fun ago(t: Long) = if (t == 0L) "never" else "${(now - t) / 1000}s ago"
+        return "relay up ${stats.fromRouter.get() / 1024} KB / down ${stats.toRouter.get() / 1024} KB, " +
+            "router ${ago(stats.lastFromRouterAt)}, server ${ago(stats.lastFromUpstreamAt)}, $internetText"
+    }
+
+    private fun registerPowerEvents(app: Context) {
+        val pm = app.getSystemService(PowerManager::class.java)
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, i: Intent) {
+                val what = when (i.action) {
+                    Intent.ACTION_SCREEN_ON -> "Screen on"
+                    Intent.ACTION_SCREEN_OFF -> "Screen off"
+                    Intent.ACTION_USER_PRESENT -> "Unlocked"
+                    PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> "Doze ${if (pm.isDeviceIdleMode) "ON" else "off"}"
+                    PowerManager.ACTION_POWER_SAVE_MODE_CHANGED -> "Battery saver ${if (pm.isPowerSaveMode) "ON" else "off"}"
+                    else -> return
+                }
+                event("$what | ${snapshotText()}")
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_USER_PRESENT)
+            addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED); addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+        }
+        if (Build.VERSION.SDK_INT >= 33) app.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        else app.registerReceiver(receiver, filter)
+        powerReceiver = receiver
+    }
+
+    /** Looks up a Mullvad web server over the internet network, to measure the internet side of the path. */
+    private fun resolveInternetTarget(n: Network) {
+        Thread {
+            internetTarget = runCatching { InetSocketAddress(n.getByName("api.mullvad.net"), 443) }.getOrNull()
+        }.apply { isDaemon = true; start() }
     }
 
     /** Points the relay at a VPN server (an IPv4 address). Remembered if the relay is not running yet. */

@@ -74,6 +74,15 @@ class AuroraDrawable : Drawable() {
     override fun getOpacity(): Int = PixelFormat.OPAQUE
 }
 
+/**
+ * Selectable text that never scrolls its parent to follow the text cursor. A focused, selectable
+ * TextView otherwise drags the whole page to itself every time its text changes, which made the
+ * screen jump to the log whenever a button was pressed.
+ */
+class QuietTextView(context: Context) : TextView(context) {
+    override fun bringPointIntoView(offset: Int): Boolean = false
+}
+
 /** View factory for the screen's building blocks. */
 class Ui(private val ctx: Context) {
     private val medium = Typeface.create("sans-serif-medium", Typeface.NORMAL)
@@ -112,7 +121,7 @@ class Ui(private val ctx: Context) {
 
     fun caption(t: String) = TextView(ctx).apply { text = t; textSize = 12.5f; setTextColor(Glass.TEXT_2) }
 
-    fun mono(t: String, sizeSp: Float = 12f) = TextView(ctx).apply {
+    fun mono(t: String, sizeSp: Float = 12f) = QuietTextView(ctx).apply {
         text = t; textSize = sizeSp; setTextColor(Glass.TEXT); typeface = Typeface.MONOSPACE
         setTextIsSelectable(true)
     }
@@ -319,6 +328,8 @@ class LiveGraphView(
     context: Context,
     private val downColor: Int,
     private val upColor: Int,
+    private val floor: Float = 50_000f,
+    private val format: (Double) -> String = TrafficMath::formatRate,
 ) : View(context) {
     private val capacity = 60
     private val down = FloatArray(capacity)
@@ -352,7 +363,7 @@ class LiveGraphView(
         val top = 16f * density
         val bottom = h - 4f * density
         val chartH = bottom - top
-        var peak = 50_000f // floor of 50 Kbps so an idle line doesn't look like a storm
+        var peak = floor // a minimum scale so an idle line doesn't look like a storm
         for (i in 0 until count) peak = maxOf(peak, down[i], up[i])
         val max = peak * 1.15f
 
@@ -360,7 +371,7 @@ class LiveGraphView(
             val y = top + chartH * i / 2f
             canvas.drawLine(0f, y, w, y, grid)
         }
-        canvas.drawText(TrafficMath.formatRate(max.toDouble()), 2f * density, 11f * density, label)
+        canvas.drawText(format(max.toDouble()), 2f * density, 11f * density, label)
 
         drawSeries(canvas, up, upColor, w, top, chartH, max)
         drawSeries(canvas, down, downColor, w, top, chartH, max)
@@ -393,10 +404,17 @@ class LiveGraphView(
 }
 
 /** Title, current rates and a live graph. */
-class TrafficPanel(context: Context, title: String) : LinearLayout(context) {
+class TrafficPanel(
+    context: Context,
+    title: String,
+    floor: Float = 50_000f,
+    private val format: (Double) -> String = TrafficMath::formatRate,
+    private val downLabel: String = "\u2193",
+    private val upLabel: String = "\u2191",
+) : LinearLayout(context) {
     private val downColor = Glass.DOWN
     private val upColor = Glass.UP
-    private val graph = LiveGraphView(context, downColor, upColor)
+    private val graph = LiveGraphView(context, downColor, upColor, floor, format)
     private val rates = TextView(context).apply { textSize = 12f; typeface = Typeface.MONOSPACE }
     private val density = resources.displayMetrics.density
 

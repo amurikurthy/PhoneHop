@@ -16,6 +16,10 @@ class RelayStats {
     /** Bytes received from the VPN server (heading to the router). */
     val toRouter = AtomicLong()
     val dropped = AtomicLong()
+    /** Send failures, and how often the sockets were re-opened to recover from a stall. */
+    val sendErrors = AtomicLong()
+    val upstreamRebinds = AtomicLong()
+    val listenRebinds = AtomicLong()
     @Volatile var routerAddress: InetSocketAddress? = null
     @Volatile var lastFromRouterAt = 0L
     @Volatile var lastFromUpstreamAt = 0L
@@ -56,12 +60,23 @@ class Relay(
     private val openUpstream: () -> DatagramSocket,
     val stats: RelayStats = RelayStats(),
     private val log: (String) -> Unit = {},
+    /** Self-heal: this much one-way traffic with no answer for this long means the socket went stale. */
+    private val healBytes: Long = 16_000,
+    private val healSilenceMs: Long = 15_000,
+    private val healCooldownMs: Long = 30_000,
+    private val watchdogTickMs: Long = 2_000,
+    /** Runs at the start of each relay thread (on Android: raises its scheduling priority). */
+    private val threadSetup: () -> Unit = {},
 ) {
     private val running = AtomicBoolean(false)
     @Volatile private var upstream: InetSocketAddress? = null
     @Volatile private var listenSocket: DatagramSocket? = null
     @Volatile private var upstreamSocket: DatagramSocket? = null
     private val threads = mutableListOf<Thread>()
+    private val sentSinceReply = AtomicLong()
+    private val receivedSinceRouterPacket = AtomicLong()
+    @Volatile private var lastUpstreamHeal = 0L
+    @Volatile private var lastListenHeal = 0L
 
     /** Actual bound port once listening, else -1. */
     val localPort: Int get() = listenSocket?.localPort ?: -1
@@ -75,8 +90,9 @@ class Relay(
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
-        threads += Thread(::listenLoop, "relay-listen").apply { isDaemon = true; start() }
-        threads += Thread(::upstreamLoop, "relay-upstream").apply { isDaemon = true; start() }
+        threads += Thread({ threadSetup(); listenLoop() }, "relay-listen").apply { isDaemon = true; start() }
+        threads += Thread({ threadSetup(); upstreamLoop() }, "relay-upstream").apply { isDaemon = true; start() }
+        threads += Thread(::watchdogLoop, "relay-watchdog").apply { isDaemon = true; start() }
     }
 
     fun stop() {
@@ -149,10 +165,13 @@ class Relay(
         }
         stats.lastFromRouterAt = System.currentTimeMillis()
         stats.fromRouter.addAndGet(p.length.toLong())
+        receivedSinceRouterPacket.set(0)
+        sentSinceReply.addAndGet(p.length.toLong())
         try {
             up.send(DatagramPacket(p.data, p.length, target))
         } catch (e: Exception) {
             stats.dropped.incrementAndGet()
+            stats.sendErrors.incrementAndGet()
         }
     }
 
@@ -195,10 +214,39 @@ class Relay(
         if (router == null || out == null) { stats.dropped.incrementAndGet(); return }
         stats.lastFromUpstreamAt = System.currentTimeMillis()
         stats.toRouter.addAndGet(p.length.toLong())
+        sentSinceReply.set(0)
+        receivedSinceRouterPacket.addAndGet(p.length.toLong())
         try {
             out.send(DatagramPacket(p.data, p.length, router))
         } catch (e: Exception) {
             stats.dropped.incrementAndGet()
+            stats.sendErrors.incrementAndGet()
+        }
+    }
+
+    /**
+     * Notices a stalled socket and re-opens it. A quiet tunnel (only WireGuard keepalives) never trips this;
+     * it needs real one-way traffic with no answer, which is what a socket left stale by a radio or
+     * network change looks like.
+     */
+    private fun watchdogLoop() {
+        while (running.get()) {
+            sleep(watchdogTickMs)
+            val now = System.currentTimeMillis()
+            if (sentSinceReply.get() > healBytes && now - stats.lastFromUpstreamAt > healSilenceMs && now - lastUpstreamHeal > healCooldownMs) {
+                lastUpstreamHeal = now
+                sentSinceReply.set(0)
+                stats.upstreamRebinds.incrementAndGet()
+                log("Relay: the server stopped answering; re-opening the upstream socket")
+                rebindUpstream()
+            }
+            if (receivedSinceRouterPacket.get() > healBytes && now - stats.lastFromRouterAt > healSilenceMs && now - lastListenHeal > healCooldownMs) {
+                lastListenHeal = now
+                receivedSinceRouterPacket.set(0)
+                stats.listenRebinds.incrementAndGet()
+                log("Relay: the router stopped sending; re-opening the listener")
+                rebindListen()
+            }
         }
     }
 

@@ -61,13 +61,31 @@ class KeepAliveService : Service() {
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PhoneHop:keepalive")
                 .apply { setReferenceCounted(false); acquire() }
         }
-        if (wifiLock == null) {
-            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "PhoneHop:wifi")
-                .apply { setReferenceCounted(false); acquire() }
-        }
+        applyWifiLock()
         RelayRuntime.start(applicationContext)
+        GroupRuntime.start(applicationContext)
         return START_STICKY
+    }
+
+    /**
+     * Holds the Wi-Fi lock the user picked. Low latency only takes effect while the screen is on and the app is
+     * in front, so High performance and Off are offered to compare in the latency graph.
+     */
+    @Suppress("DEPRECATION")
+    private fun applyWifiLock() {
+        wifiLock?.takeIf { it.isHeld }?.release()
+        wifiLock = null
+        val mode = WifiLockMode.fromPrefs(getSharedPreferences("phonehop", Context.MODE_PRIVATE))
+        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val lockType = when (mode) {
+            WifiLockMode.LOW_LATENCY -> WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            WifiLockMode.HIGH_PERF -> WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            WifiLockMode.OFF -> null
+        }
+        if (lockType != null) {
+            wifiLock = wm.createWifiLock(lockType, "PhoneHop:wifi").apply { setReferenceCounted(false); acquire() }
+        }
+        RelayRuntime.event("Wi-Fi lock: ${mode.label}")
     }
 
     override fun onDestroy() {
@@ -81,6 +99,11 @@ class KeepAliveService : Service() {
 
     companion object {
         private const val ACTION_STOP = "app.phonehop.STOP"
+        private const val ACTION_APPLY_WIFI_LOCK = "app.phonehop.APPLY_WIFI_LOCK"
+
+        /** Re-reads the saved Wi-Fi lock choice and applies it. */
+        fun applyWifiLockChoice(context: Context) =
+            context.startForegroundService(Intent(context, KeepAliveService::class.java).setAction(ACTION_APPLY_WIFI_LOCK))
         private const val CHANNEL = "keepalive"
         private const val NOTIFICATION_ID = 1
 
@@ -89,5 +112,15 @@ class KeepAliveService : Service() {
 
         fun stop(context: Context) =
             context.stopService(Intent(context, KeepAliveService::class.java))
+    }
+}
+
+enum class WifiLockMode(val label: String) {
+    LOW_LATENCY("Low latency"), HIGH_PERF("High perf"), OFF("Off");
+
+    companion object {
+        const val PREF = "wifi_lock_mode"
+        fun fromPrefs(p: android.content.SharedPreferences) =
+            values().getOrElse(p.getInt(PREF, 0)) { LOW_LATENCY }
     }
 }
