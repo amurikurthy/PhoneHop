@@ -6,6 +6,8 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.wifi.WifiNetworkSpecifier
+import android.os.Handler
+import android.os.Looper
 
 /**
  * Joins the router's link network the way wireless Android Auto joins a car: with a network request, not a saved
@@ -18,6 +20,8 @@ object LinkRuntime {
     private var lastKey: String? = null
     @Volatile var network: Network? = null
         private set
+    private val handler = Handler(Looper.getMainLooper())
+    private var retryDelayMs = RETRY_FIRST_MS
 
     @Synchronized
     fun start(context: Context) {
@@ -55,13 +59,25 @@ object LinkRuntime {
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(n: Network) {
                 network = n
+                retryDelayMs = RETRY_FIRST_MS
                 RelayRuntime.event("Joined the link network \"$ssid\"")
                 RelayRuntime.linkJoined()
             }
             override fun onLost(n: Network) {
                 if (network == n) { network = null; RelayRuntime.event("Lost the link network") }
             }
-            override fun onUnavailable() { RelayRuntime.event("Android could not join the link network (not in range, or not approved)") }
+            override fun onUnavailable() {
+                // Android gave up on this request (router still starting, out of range, or a scan that missed). A request
+                // never retries itself, so ask again after a pause, waiting longer each time.
+                val wait = retryDelayMs
+                retryDelayMs = minOf(wait * 2, RETRY_MAX_MS)
+                RelayRuntime.event("Android could not join the link network; trying again in ${wait / 1000} s")
+                handler.postDelayed({
+                    synchronized(this@LinkRuntime) {
+                        if (callback === this) { release(); ensure(ssid, passphrase) }
+                    }
+                }, wait)
+            }
         }
         callback = cb
         lastKey = key
@@ -75,9 +91,12 @@ object LinkRuntime {
         }
     }
 
+    private const val RETRY_FIRST_MS = 5_000L
+    private const val RETRY_MAX_MS = 30_000L
+
     /** Stops the link request (used when quitting). The phone leaves the link network. */
     @Synchronized
-    fun remove() = release()
+    fun remove() { handler.removeCallbacksAndMessages(null); release() }
 
     private fun release() {
         val ctx = appContext
