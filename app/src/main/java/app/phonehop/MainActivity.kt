@@ -297,6 +297,11 @@ class MainActivity : Activity() {
                 latencyPanel,
                 latencySummary,
                 ui.labeled("Wi-Fi lock", lockSegmented, "Keeps the phone's Wi-Fi radio from power-saving. Try each and watch the graph; Low latency only works with the screen on."),
+                ui.toggle("Keep link warm (test)", prefs.getBoolean("keep_warm", false)) { on ->
+                    prefs.edit().putBoolean("keep_warm", on).apply()
+                    RelayRuntime.setKeepWarm(on)
+                },
+                ui.caption("Sends a tiny packet to the router every 150 ms so the phone's Wi-Fi never sleeps. Uses more battery. Turn it on while pinging from a laptop to see whether the delay swings disappear."),
                 batteryNote,
                 batteryButton,
                 ui.secondary("Clear stats") { RelayRuntime.latency.clear(); latencySummary.text = "Measuring..." },

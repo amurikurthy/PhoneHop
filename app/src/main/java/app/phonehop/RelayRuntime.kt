@@ -117,6 +117,7 @@ object RelayRuntime {
         pendingUpstream?.let { runCatching { r.setUpstream(it, PORT) } }
         r.start()
         appContext = app
+        if (app.getSharedPreferences("phonehop", Context.MODE_PRIVATE).getBoolean("keep_warm", false)) setKeepWarm(true)
         registerPowerEvents(app)
         val pm = app.getSystemService(PowerManager::class.java)
         probe = LatencyProbe(
@@ -217,6 +218,40 @@ object RelayRuntime {
     private fun openUpstreamSocket(): DatagramSocket {
         val n = upstreamNetwork() ?: throw IOException("no internet network")
         return DatagramSocket().also { n.bindSocket(it) }
+    }
+
+    // ---------------------------------------------------------------- keep the link awake (test)
+
+    @Volatile private var keepWarm = false
+    private var warmThread: Thread? = null
+
+    /**
+     * Sends a one-byte packet to the router every 150 ms so the phone's Wi-Fi never drops into power saving, where
+     * the router's packets wait for the next wake-up. Costs battery; for finding out whether that is the latency problem.
+     */
+    @Synchronized
+    fun setKeepWarm(on: Boolean) {
+        keepWarm = on
+        event("Keep link warm: ${if (on) "on" else "off"}")
+        if (!on || warmThread != null) return
+        warmThread = Thread({
+            var socket: DatagramSocket? = null
+            val target = InetAddress.getByName(Link.ROUTER_IP)
+            while (keepWarm) {
+                try {
+                    if (socket == null) {
+                        val n = linkNetwork()
+                        if (n != null) socket = DatagramSocket().also { n.bindSocket(it) }
+                    }
+                    socket?.send(java.net.DatagramPacket(ByteArray(1), 1, target, 9))
+                } catch (e: Exception) {
+                    runCatching { socket?.close() }; socket = null
+                }
+                try { Thread.sleep(150) } catch (e: InterruptedException) { break }
+            }
+            runCatching { socket?.close() }
+            synchronized(this) { warmThread = null }
+        }, "link-warm").apply { isDaemon = true; start() }
     }
 
     /** The Wi-Fi network that carries the router link, so sockets to the router are routed over it. */
