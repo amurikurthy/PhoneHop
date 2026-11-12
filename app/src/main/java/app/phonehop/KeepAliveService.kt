@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.drawable.Icon
 import android.net.wifi.WifiManager
 import android.os.IBinder
 import android.os.PowerManager
@@ -24,6 +25,11 @@ class KeepAliveService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL, "PhoneHop running", NotificationManager.IMPORTANCE_LOW)
@@ -34,8 +40,18 @@ class KeepAliveService : Service() {
         val notification = Notification.Builder(this, CHANNEL)
             .setContentTitle("PhoneHop is running")
             .setContentText("Keeping the Wi-Fi Direct group alive")
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
             .setContentIntent(open)
+            .addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(this, R.drawable.ic_launcher_monochrome), "Stop",
+                    PendingIntent.getService(
+                        this, 1,
+                        Intent(this, KeepAliveService::class.java).setAction(ACTION_STOP),
+                        PendingIntent.FLAG_IMMUTABLE
+                    )
+                ).build()
+            )
             .setOngoing(true)
             .build()
         startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
@@ -62,6 +78,7 @@ class KeepAliveService : Service() {
     }
 
     companion object {
+        private const val ACTION_STOP = "app.phonehop.STOP"
         private const val CHANNEL = "keepalive"
         private const val NOTIFICATION_ID = 1
 

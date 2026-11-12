@@ -20,6 +20,9 @@ object MullvadApi {
         val publicKey: String,
         val owned: Boolean,
         val provider: String,
+        val latitude: Double,
+        val longitude: Double,
+        val weight: Int,
     )
 
     data class RelayList(val relays: List<Relay>, val gatewayV4: String, val portRanges: List<IntRange>)
@@ -55,10 +58,19 @@ object MullvadApi {
                     publicKey = r.getString("public_key"),
                     owned = r.optBoolean("owned", false),
                     provider = r.optString("provider", ""),
+                    latitude = loc.optDouble("latitude", 0.0),
+                    longitude = loc.optDouble("longitude", 0.0),
+                    weight = r.optInt("weight", 1),
                 )
             }
         }.sortedWith(compareBy({ it.country }, { it.city }, { it.hostname }))
         return RelayList(relays, wg.optString("ipv4_gateway", "10.64.0.1"), ranges)
+    }
+
+    /** Approximate (latitude, longitude) of this connection's public IP, from Mullvad's own endpoint. */
+    fun ipLocation(): Pair<Double, Double> {
+        val o = JSONObject(request("GET", "https://am.i.mullvad.net/json"))
+        return Pair(o.getDouble("latitude"), o.getDouble("longitude"))
     }
 
     /** Exchanges an account number for a short-lived access token. */
@@ -93,7 +105,7 @@ object MullvadApi {
     )
 
     private fun request(method: String, path: String, body: String? = null, bearer: String? = null): String {
-        val conn = URL(BASE + path).openConnection() as HttpURLConnection
+        val conn = URL(if (path.startsWith("http")) path else BASE + path).openConnection() as HttpURLConnection
         try {
             conn.requestMethod = method
             conn.connectTimeout = 10_000

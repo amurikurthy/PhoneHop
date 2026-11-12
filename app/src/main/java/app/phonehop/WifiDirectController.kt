@@ -99,7 +99,7 @@ class WifiDirectController(
         }
     }
 
-    private fun doCreate(ch: WifiP2pManager.Channel, ssid: String, passphrase: String, band: Band) {
+    private fun doCreate(ch: WifiP2pManager.Channel, ssid: String, passphrase: String, band: Band, mayFallBack: Boolean = true) {
         val config = try {
             WifiP2pConfig.Builder()
                 .setNetworkName(ssid)
@@ -117,15 +117,31 @@ class WifiDirectController(
                 log("createGroup accepted; waiting for group info")
                 refresh()
             }
-            override fun onFailure(reason: Int) = log("createGroup failed: ${reasonText(reason)}")
+            override fun onFailure(reason: Int) {
+                if (band == Band.GHZ_5 && mayFallBack) {
+                    log("5 GHz group failed (${reasonText(reason)}); retrying on 2.4 GHz")
+                    doCreate(ch, ssid, passphrase, Band.GHZ_2_4, mayFallBack = false)
+                } else {
+                    log("createGroup failed: ${reasonText(reason)}")
+                }
+            }
         })
     }
 
-    fun removeGroup() {
-        val ch = channel ?: return
+    /** Tears the group down; [onDone] runs once the system has answered (or after a short timeout). */
+    fun removeGroup(onDone: (() -> Unit)? = null) {
+        val ch = channel
+        if (ch == null) { onDone?.invoke(); return }
+        val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun done() { if (finished.compareAndSet(false, true)) onDone?.invoke() }
+        android.os.Handler(Looper.getMainLooper()).postDelayed({ done() }, 2_000)
         manager.removeGroup(ch, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() { log("Group removed"); onGroup(null) }
-            override fun onFailure(reason: Int) = log("removeGroup failed: ${reasonText(reason)}")
+            override fun onSuccess() { log("Group removed"); onGroup(null); done() }
+            override fun onFailure(reason: Int) {
+                // Failing because there is no group is fine when we are just cleaning up.
+                if (onDone == null) log("removeGroup failed: ${reasonText(reason)}")
+                done()
+            }
         })
     }
 

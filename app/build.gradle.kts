@@ -23,8 +23,8 @@ android {
         minSdk = 29
         targetSdk = 35
         // CI passes these from the git tag (v1.2.3 -> name 1.2.3, code 10203).
-        versionName = (findProperty("versionName") as String?) ?: "0.2.0"
-        versionCode = ((findProperty("versionCode") as String?) ?: "200").toInt()
+        versionName = (findProperty("versionName") as String?) ?: "0.3.0"
+        versionCode = ((findProperty("versionCode") as String?) ?: "300").toInt()
     }
 
     signingConfigs {
