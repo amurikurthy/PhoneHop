@@ -91,6 +91,7 @@ class Relay(
     @Volatile private var lastUpstreamHeal = 0L
     @Volatile private var awaitingSince = 0L // nanoTime of the oldest packet sent to the server with no answer yet
     @Volatile private var lastListenHeal = 0L
+    @Volatile private var lastReplyNs = System.nanoTime() - 10_000_000_000L
 
     /** Actual bound port once listening, else -1. */
     val localPort: Int get() = listenSocket?.localPort ?: -1
@@ -196,7 +197,8 @@ class Relay(
         sentSinceReply.addAndGet(p.length.toLong())
         try {
             up.send(DatagramPacket(p.data, p.length, target))
-            if (awaitingSince == 0L) awaitingSince = startedNs
+            // Only time a round trip that starts from quiet; under streaming, replies belong to older packets.
+            if (awaitingSince == 0L && startedNs - lastReplyNs > 1_000_000_000L) awaitingSince = startedNs
             val tookUs = (System.nanoTime() - startedNs) / 1_000
             stats.maxForwardUs.accumulateAndGet(tookUs) { a, b -> maxOf(a, b) }
         } catch (e: Exception) {
@@ -244,6 +246,7 @@ class Relay(
         if (router == null || out == null) { stats.dropped.incrementAndGet(); return }
         stats.lastFromUpstreamAt = System.currentTimeMillis()
         stats.toRouter.addAndGet(p.length.toLong())
+        lastReplyNs = System.nanoTime()
         val since = awaitingSince
         if (since != 0L) { awaitingSince = 0L; stats.rtt.add((System.nanoTime() - since) / 1_000_000.0) }
         sentSinceReply.set(0)

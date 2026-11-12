@@ -6,7 +6,8 @@ import java.net.Socket
 import javax.net.SocketFactory
 
 /** One reading of both paths. A null value means that path could not be measured at that moment. */
-data class LatencySample(val at: Long, val screenOn: Boolean, val linkMs: Double?, val internetMs: Double?)
+/** [loadKbps] is how much traffic the relay was carrying when the sample was taken (kilobits per second). */
+data class LatencySample(val at: Long, val screenOn: Boolean, val linkMs: Double?, val internetMs: Double?, val loadKbps: Double = 0.0)
 
 /** Thread-safe ring buffer of recent samples. */
 class LatencyLog(private val capacity: Int = 900) {
@@ -62,6 +63,8 @@ class LatencyProbe(
     private val linkPort: Int = 22,
     /** Opens the socket used to time the router (on Android: bound to the link network). */
     private val linkSocket: () -> Socket = { Socket() },
+    /** Current relayed traffic, so latency can be split into idle and loaded. */
+    private val loadKbps: () -> Double = { 0.0 },
 ) {
     @Volatile private var running = false
     private var thread: Thread? = null
@@ -78,7 +81,7 @@ class LatencyProbe(
                 val internet = if (net != null && target != null) {
                     measureConnectMs(target, timeoutMs) { net.socketFactory.createSocket() }
                 } else null
-                val sample = LatencySample(System.currentTimeMillis(), screenOn(), link, internet)
+                val sample = LatencySample(System.currentTimeMillis(), screenOn(), link, internet, loadKbps())
                 log.add(sample)
                 onSample(sample)
                 val wait = intervalMs - (System.currentTimeMillis() - started)

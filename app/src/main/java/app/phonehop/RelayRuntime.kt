@@ -117,7 +117,7 @@ object RelayRuntime {
         pendingUpstream?.let { runCatching { r.setUpstream(it, PORT) } }
         r.start()
         appContext = app
-        if (app.getSharedPreferences("phonehop", Context.MODE_PRIVATE).getBoolean("keep_warm", false)) setKeepWarm(true)
+        if (app.getSharedPreferences("phonehop", Context.MODE_PRIVATE).getBoolean("keep_warm", true)) setKeepWarm(true)
         registerPowerEvents(app)
         val pm = app.getSystemService(PowerManager::class.java)
         probe = LatencyProbe(
@@ -127,6 +127,7 @@ object RelayRuntime {
             screenOn = { pm.isInteractive },
             log = latency,
             linkSocket = { linkNetwork()?.socketFactory?.createSocket() ?: java.net.Socket() },
+            loadKbps = ::currentLoadKbps,
         ).also { it.start() }
         event("Relay started")
     }
@@ -257,6 +258,19 @@ object RelayRuntime {
             runCatching { socket?.close() }
             synchronized(this) { warmThread = null }
         }, "link-warm").apply { isDaemon = true; start() }
+    }
+
+    private var loadBytes = 0L
+    private var loadAt = 0L
+
+    /** Relayed kilobits per second since the previous call (both directions). */
+    @Synchronized
+    private fun currentLoadKbps(): Double {
+        val now = System.currentTimeMillis()
+        val bytes = stats.fromRouter.get() + stats.toRouter.get()
+        val kbps = if (loadAt == 0L || now <= loadAt) 0.0 else (bytes - loadBytes) * 8.0 / (now - loadAt)
+        loadBytes = bytes; loadAt = now
+        return kbps
     }
 
     /** The Wi-Fi network that carries the router link, so sockets to the router are routed over it. */

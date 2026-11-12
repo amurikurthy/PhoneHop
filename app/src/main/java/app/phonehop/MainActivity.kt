@@ -297,7 +297,7 @@ class MainActivity : Activity() {
                 latencyPanel,
                 latencySummary,
                 ui.labeled("Wi-Fi lock", lockSegmented, "Keeps the phone's Wi-Fi radio from power-saving. Try each and watch the graph; Low latency only works with the screen on."),
-                ui.toggle("Keep link and cellular warm (test)", prefs.getBoolean("keep_warm", false)) { on ->
+                ui.toggle("Keep link and cellular warm", prefs.getBoolean("keep_warm", true)) { on ->
                     prefs.edit().putBoolean("keep_warm", on).apply()
                     RelayRuntime.setKeepWarm(on)
                 },
@@ -679,7 +679,7 @@ class MainActivity : Activity() {
                     "Server" to (selectedRelay?.let { "${it.hostname} ${it.ipv4}" } ?: "none"),
                     "Server selection" to if (prefs.getBoolean(PREF_AUTO, true)) "auto" else "manual",
                     "Wi-Fi lock" to WifiLockMode.fromPrefs(prefs).label,
-                    "Keep warm" to prefs.getBoolean("keep_warm", false).toString(),
+                    "Keep warm" to prefs.getBoolean("keep_warm", true).toString(),
                     "Link network" to (ssidField.text.toString()),
                     "Router paired" to (profiles.active()?.title ?: "no"),
                 ),
@@ -754,6 +754,8 @@ class MainActivity : Activity() {
             appendLine(row("Link, screen off", recent.filter { !it.screenOn }.mapNotNull { it.linkMs }))
             appendLine(row("Internet, on", recent.filter { it.screenOn }.mapNotNull { it.internetMs }))
             appendLine(row("Internet, off", recent.filter { !it.screenOn }.mapNotNull { it.internetMs }))
+            appendLine(row("Internet, idle", recent.filter { it.loadKbps < IDLE_KBPS }.mapNotNull { it.internetMs }))
+            appendLine(row("Internet, loaded", recent.filter { it.loadKbps >= IDLE_KBPS }.mapNotNull { it.internetMs }))
             appendLine(row("Tunnel via relay", RelayRuntime.stats.rtt.since(cutoff)))
             append("Relay forwarding: slowest ${"%.1f".format(Locale.US, RelayRuntime.stats.maxForwardUs.get() / 1000.0)} ms")
             append("\n(spikes are readings of 150 ms or more)")
@@ -843,6 +845,8 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_ALL = 1
+        /** Below this much relayed traffic the link counts as idle. */
+        private const val IDLE_KBPS = 200.0
         private const val PREF_SSID = "link_ssid"
         private const val PREF_PASS = "link_pass"
         private const val PREF_AUTO = "server_auto"

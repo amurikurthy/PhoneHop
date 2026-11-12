@@ -50,14 +50,16 @@ object DiagnosticsReport {
             summary("Link, screen off", i.samples.filter { !it.screenOn }.mapNotNull { it.linkMs })
             summary("Internet, screen on", i.samples.filter { it.screenOn }.mapNotNull { it.internetMs })
             summary("Internet, screen off", i.samples.filter { !it.screenOn }.mapNotNull { it.internetMs })
+            summary("Internet, idle (<200 kbps relayed)", i.samples.filter { it.loadKbps < 200.0 }.mapNotNull { it.internetMs })
+            summary("Internet, loaded (>=200 kbps relayed)", i.samples.filter { it.loadKbps >= 200.0 }.mapNotNull { it.internetMs })
             summary("Tunnel via relay", i.tunnelRtt)
             appendLine()
             appendLine("== Tunnel round trips seen by the relay (ms, newest last) ==")
             appendLine(if (i.tunnelRtt.isEmpty()) "none" else i.tunnelRtt.joinToString(" ") { "%.0f".format(Locale.US, it) })
             appendLine()
-            appendLine("== Samples: time,screen,link_ms,internet_ms ==")
+            appendLine("== Samples: time,screen,link_ms,internet_ms,relayed_kbps ==")
             i.samples.forEach {
-                appendLine("${t(it.at)},${if (it.screenOn) "on" else "off"},${it.linkMs?.let { v -> "%.0f".format(Locale.US, v) } ?: ""},${it.internetMs?.let { v -> "%.0f".format(Locale.US, v) } ?: ""}")
+                appendLine("${t(it.at)},${if (it.screenOn) "on" else "off"},${it.linkMs?.let { v -> "%.0f".format(Locale.US, v) } ?: ""},${it.internetMs?.let { v -> "%.0f".format(Locale.US, v) } ?: ""},${"%.0f".format(Locale.US, it.loadKbps)}")
             }
             appendLine()
             appendLine("== Events ==")
