@@ -8,3 +8,4 @@ local.properties
 keystore.properties
 release.jks
 *.apk.sha256
+.kotlin/

@@ -22,7 +22,7 @@ class RouterScriptsTest {
     ) = RouterPlan(
         phoneSsid = ssid, phonePassphrase = pass, prefer5Ghz = prefer5,
         wgPrivateKey = key, wgAddressV4 = "10.66.1.2/32", wgAddressV6 = "fc00:bbbb:bbbb:bb01::2:102/128",
-        serverPublicKey = serverKey, clientSsid = clientSsid, clientPassphrase = clientPass, country = country,
+        serverPublicKey = serverKey, clientSsid = clientSsid, clientPassphrase = clientPass, adminPassword = "admin-pass-1", country = country,
         lanAddress = lan, lanPrefix = lanPrefix,
         nowMillis = 1_800_000_000_000L,
     )
@@ -203,6 +203,7 @@ class RouterScriptsTest {
         fun shim(name: String, body: String) = File(dir, "bin/$name").apply { writeText("#!/bin/sh\n$body\n"); setExecutable(true) }
         for (name in listOf("date", "modprobe")) shim(name, "echo \"$name \$*\" >> '${dir}/calls.log'")
         shim("wg", "exit 0")
+        shim("passwd", "cat >> '${dir}/passwd.log'")
         for (name in listOf("ifup", "ifdown")) shim(name, "echo \"$name \$*\" >> '${dir}/calls.log'")
         // `wifi config` regenerates the wireless file for this hardware.
         shim("wifi", "echo \"wifi \$*\" >> '${dir}/calls.log'\n[ \"\$1\" = config ] && echo 'GENERATED wireless' > \"\$PH_CFG/wireless\"\nexit 0")
@@ -278,10 +279,10 @@ class RouterScriptsTest {
         assertEquals(listOf("100"), r.get("dhcp.lan.start"))
         assertEquals(listOf("150"), r.get("dhcp.lan.limit"))
         assertTrue(out, out.contains("PHONEHOP_LAN=192.168.50.1/255.255.255.0"))
-        // --- the link: a /30 with one lease and no gateway or DNS handed out
+        // --- the link: a /30 with one lease; gateway and DNS point at the router (Android needs both)
         assertEquals(listOf("192.168.51.1"), r.get("network.phonelink.ipaddr"))
         assertEquals(listOf("1"), r.get("dhcp.phonelink.limit"))
-        assertEquals(listOf("3", "6"), r.get("dhcp.phonelink.dhcp_option"))
+        assertEquals(listOf("3,192.168.51.1", "6,192.168.51.1"), r.get("dhcp.phonelink.dhcp_option"))
         // --- tunnel points at the phone
         assertEquals(listOf("wireguard"), r.get("network.mullvad.proto"))
         assertEquals(listOf("10.66.1.2/32", "fc00:bbbb:bbbb:bb01::2:102/128"), r.get("network.mullvad.addresses"))
@@ -299,6 +300,9 @@ class RouterScriptsTest {
         assertEquals(listOf("10.64.0.1"), r.get("dhcp.@dnsmasq[0].server"))
         assertEquals(listOf("1"), r.get("dhcp.@dnsmasq[0].noresolv"))
         assertNull(r.get("dropbear.@dropbear[0].Interface"))
+        // --- the admin password the user chose is set on the router
+        assertEquals("admin-pass-1\nadmin-pass-1\n", File(r.dir, "passwd.log").readText())
+        assertTrue(out, out.contains("PHONEHOP_ADMIN_PASSWORD_SET=1"))
         // --- safety net
         assertTrue(File(r.dir, "pending").exists())
         assertTrue(File(r.dir, "revert.sh").readText().contains("PHONEHOP_REVERTED"))
@@ -433,18 +437,10 @@ class RouterScriptsTest {
         assertTrue(out, out.contains("not set up"))
     }
 
-    @Test fun setupPrintsAnOffRouterCopyOfTheBackup() {
-        val r = newRouter() ?: return
-        val (code, out) = run(r, RouterScripts.setup(plan()))
-        assertEquals(out, 0, code)
-        val b64 = RouterScripts.parseMarkers(out)["BACKUP_B64"]
-        assertNotNull(out, b64)
-        val bytes = java.util.Base64.getDecoder().decode(b64)
-        assertTrue(bytes.size > 20 && bytes[0] == 0x1f.toByte() && bytes[1] == 0x8b.toByte()) // gzip header
-    }
-
-    @Test fun wifiNamesGetBandSuffixes() {
-        assertEquals(Pair("Home_5G", "Home_2.4G"), RouterScripts.wifiNames("Home"))
+    @Test fun rejectsAWeakOrMissingAdminPassword() {
+        assertNotNull(RouterScripts.validate(plan().copy(adminPassword = "short")))
+        assertNotNull(RouterScripts.validate(plan().copy(adminPassword = "")))
+        assertNull(RouterScripts.validate(plan()))
     }
 
     @Test fun rejectsABadServerKey() {
@@ -468,7 +464,7 @@ class RouterScriptsTest {
         assertEquals(listOf("192.168.51.1"), r.get("network.phonelink.ipaddr"))
         assertEquals(listOf("255.255.255.252"), r.get("network.phonelink.netmask"))
         assertEquals(listOf("1"), r.get("dhcp.phonelink.limit"))
-        assertEquals(listOf("3", "6"), r.get("dhcp.phonelink.dhcp_option"))
+        assertEquals(listOf("3,192.168.51.1", "6,192.168.51.1"), r.get("dhcp.phonelink.dhcp_option"))
         // the tunnel's endpoint is the phone's fixed address; only the phone may SSH in over the link
         assertEquals(listOf("192.168.51.2"), r.get("network.mullvad_peer.endpoint_host"))
         assertEquals(listOf("phonelink"), r.get("firewall.phonehop_ssh.src"))

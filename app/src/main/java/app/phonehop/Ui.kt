@@ -80,6 +80,11 @@ class AuroraDrawable : Drawable() {
  * screen jump to the log whenever a button was pressed.
  */
 class QuietTextView(context: Context) : TextView(context) {
+    init {
+        // When focus lands here (the system re-focuses after a card is redrawn), do not scroll the page to us.
+        revealOnFocusHint = false
+    }
+
     override fun bringPointIntoView(offset: Int): Boolean = false
 }
 

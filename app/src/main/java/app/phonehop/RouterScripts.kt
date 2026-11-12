@@ -26,6 +26,8 @@ data class RouterPlan(
      */
     val clientSsid: String,
     val clientPassphrase: String,
+    /** The router's new admin (root) password, set during setup. The phone keeps it, encrypted, to manage the router. */
+    val adminPassword: String,
     /** The router's own address and subnet; devices behind it get addresses in this range. */
     val lanAddress: String = "192.168.50.1",
     val lanPrefix: Int = 24,
@@ -68,6 +70,7 @@ object RouterScripts {
         if (p.country.isNotEmpty() && !Regex("^[A-Z]{2}$").matches(p.country)) return "Country code must be two capital letters"
         LanPlan.validate(LanPlan.Lan(p.lanAddress, p.lanPrefix), LanPlan.Lan(p.relayHost, 24))?.let { return it }
         if (p.relayHost != Link.PHONE_IP) return "The phone's link address must be ${Link.PHONE_IP}"
+        if (p.adminPassword.length !in 8..63 || bad(p.adminPassword)) return "The router admin password must be 8 to 63 characters"
         if (p.rollbackSeconds !in 60..86_400) return "Rollback time is not valid"
         return null
     }
@@ -91,6 +94,7 @@ object RouterScripts {
             "CLIENT_SSID" to shq(p.clientSsid),
             "CLIENT_PSK" to shq(p.clientPassphrase),
             "COUNTRY" to shq(p.country),
+            "ADMIN_PW" to shq(p.adminPassword),
             "LAN_IP" to shq(p.lanAddress),
             "LAN_MASK" to shq(LanPlan.netmask(p.lanPrefix)),
             "DHCP_START" to LanPlan.DHCP_START.toString(),

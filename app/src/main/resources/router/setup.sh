@@ -21,6 +21,7 @@ DNS=@@DNS@@
 CLIENT_SSID=@@CLIENT_SSID@@
 CLIENT_PSK=@@CLIENT_PSK@@
 COUNTRY=@@COUNTRY@@
+ADMIN_PW=@@ADMIN_PW@@
 LAN_IP=@@LAN_IP@@
 LAN_MASK=@@LAN_MASK@@
 DHCP_START=@@DHCP_START@@
@@ -48,6 +49,10 @@ command -v wg >/dev/null 2>&1 || fail "WireGuard tools are not installed on this
 [ -d "$ROM" ] || fail "no factory defaults at $ROM; this firmware layout is not supported for a safe wipe"
 command -v "$CONFIG_GENERATE" >/dev/null 2>&1 || fail "config_generate not found; cannot rebuild the default network settings"
 command -v wifi >/dev/null 2>&1 || fail "wifi command not found"
+
+# ---- 0b. Set the admin (root) password the user chose; a failure here changes nothing else.
+printf '%s\n%s\n' "$ADMIN_PW" "$ADMIN_PW" | passwd root >/dev/null 2>&1 || fail "could not set the admin password"
+echo PHONEHOP_ADMIN_PASSWORD_SET=1
 
 # ---- 1. Full backup of the current configuration (once, so Revert always returns to the true original).
 if [ ! -f "$BK/config.tgz" ]; then
@@ -149,7 +154,9 @@ u set "dhcp.lan.limit=$DHCP_LIMIT"
 u set dhcp.lan.leasetime=12h
 echo "PHONEHOP_LAN=$LAN_IP/$LAN_MASK"
 
-# ---- 5. CLIENT mode link network: one address for the phone, no gateway, no DNS.
+# ---- 5. The link network: one address for the phone. Android refuses a DHCP lease with no gateway or DNS
+# ("IP configuration failure"), so both point at the router. The link zone forwards nothing, so Android finds
+# no internet there and keeps cellular as the phone's default network.
 ud network.wan6
 ud network.phonelink
 u set network.phonelink=interface
@@ -162,8 +169,8 @@ u set dhcp.phonelink.interface=phonelink
 u set dhcp.phonelink.start=2
 u set dhcp.phonelink.limit=1
 u set dhcp.phonelink.leasetime=12h
-u add_list dhcp.phonelink.dhcp_option=3
-u add_list dhcp.phonelink.dhcp_option=6
+u add_list dhcp.phonelink.dhcp_option=3,192.168.51.1
+u add_list dhcp.phonelink.dhcp_option=6,192.168.51.1
 
 # ---- 6. WireGuard tunnel to the VPN server, with the phone as the UDP endpoint.
 ud network.mullvad_peer
@@ -238,5 +245,4 @@ touch "$PENDING"
   command -v reload_config >/dev/null 2>&1 && reload_config
   "$INITD/dropbear" restart; wifi reload; "$INITD/network" reload; "$INITD/firewall" reload; "$INITD/dnsmasq" restart
 ) </dev/null >/dev/null 2>&1 &
-command -v base64 >/dev/null 2>&1 && echo "PHONEHOP_BACKUP_B64=$(base64 "$BK/config.tgz" | tr -d '\n')"
 echo PHONEHOP_APPLIED

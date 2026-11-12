@@ -15,8 +15,8 @@ import java.util.concurrent.Executors
 
 /**
  * Guided router setup: Prepare, Your Wi-Fi, Router, Review, Apply. It finds and identifies the
- * router, erases its configuration and rebuilds it for this phone, then watches the router join the
- * phone's Wi-Fi Direct network and the tunnel come up before confirming the change. After that it
+ * router, erases its configuration and rebuilds it for this phone, then watches the phone join the
+ * router's link network and the tunnel come up before confirming the change. After that it
  * keeps the router profile and manages the router (status, server switch, revert).
  */
 class RouterWizard(
@@ -53,7 +53,8 @@ class RouterWizard(
         ?: PassphraseGenerator.generate(16).also { prefs.edit().putString(PREF_WIFI_PASS, it).apply() }
     private var lanText = prefs.getString(PREF_LAN, null) ?: LanPlan.DEFAULT
     private var routerHost = prefs.getString(PREF_ROUTER_HOST, "") ?: ""
-    private var adminPassword = ""        // kept in memory only until pairing succeeds
+    private var adminPassword = ""        // the router's CURRENT admin password, kept in memory only
+    private var newAdminPassword = PassphraseGenerator.generate(16)  // what the setup will set it to
     private var identity: RouterIdentity? = null
     private var probeText = ""
     private var problem = ""
@@ -133,6 +134,8 @@ class RouterWizard(
         val name = ui.field("PhoneHop", wifiName)
         val pass = ui.field("8 to 63 characters", wifiPass)
         val lan = ui.field(LanPlan.DEFAULT, lanText)
+        val newAdmin = ui.field("8 to 63 characters", newAdminPassword)
+        ui.watch(newAdmin) { newAdminPassword = it }
         val preview = ui.mono("", 12f)
         fun refreshPreview() {
             val (a, b) = RouterScripts.wifiNames(name.text.toString().trim())
@@ -149,6 +152,7 @@ class RouterWizard(
             "Router setup", subtitle("This is the network your own devices will join. The router's old Wi-Fi and addressing are erased."),
             ui.labeled("Wi-Fi name", name, "Up to ${RouterScripts.MAX_WIFI_BASE_NAME} characters. _5G and _2.4G are added so each band is its own network."),
             ui.labeled("Wi-Fi password", pass, "A strong one is suggested. Change it if you like."),
+            ui.labeled("New router admin password", newAdmin, "Set on the router, replacing the old one. A strong one is suggested; the phone keeps it, encrypted, to manage the router."),
             ui.labeled("Router IP address and range", lan, "The router's own address, e.g. 192.168.50.1/24. Avoid ${phoneLink().substringBeforeLast('.')}.x (the router link) and 10.64 to 10.127 (Mullvad)."),
             preview,
             ui.secondary("Suggest a new password") {
@@ -165,7 +169,7 @@ class RouterWizard(
                         RouterPlan(
                             phoneSsid = "DIRECT-ph-x", phonePassphrase = "12345678", prefer5Ghz = true,
                             wgPrivateKey = "A".repeat(43) + "=", wgAddressV4 = "10.0.0.2/32", serverPublicKey = "A".repeat(43) + "=",
-                            clientSsid = wifiName, clientPassphrase = wifiPass,
+                            clientSsid = wifiName, clientPassphrase = wifiPass, adminPassword = newAdminPassword,
                             lanAddress = parsed.address, lanPrefix = parsed.prefix, relayHost = phoneLink(),
                         )
                     )
@@ -260,6 +264,7 @@ class RouterWizard(
                 "Address:     $routerHost\n" +
                 "Your Wi-Fi:  $w5\n             $w24\n" +
                 "Router IP:   $lanText\n" +
+                "Admin pass:  new one (saved encrypted here)\n" +
                 "Link network: ${i.linkSsid}\n" +
                 "VPN server:  ${i.relay?.hostname ?: "none"}", 12f
         )
@@ -276,7 +281,7 @@ class RouterWizard(
             ui.caption(
                 "This ERASES the router's whole configuration: Wi-Fi networks and passwords, port forwards, VPN and DHCP settings, " +
                     "and the settings of installed packages. The router's LAN address returns to its default. " +
-                    "A full backup is taken first and kept on the router and on this phone, and Revert restores it. " +
+                    "The router keeps a backup of its old settings and puts them back by itself if the tunnel does not come up. " +
                     "Installed packages and the admin password are kept. If a safety check fails, nothing is changed."
             ),
             ui.labeled("Type WIPE to continue", confirmText),
@@ -298,7 +303,7 @@ class RouterWizard(
         val plan = RouterPlan(
             phoneSsid = i.linkSsid, phonePassphrase = i.linkPass, prefer5Ghz = true,
             wgPrivateKey = priv, wgAddressV4 = v4, wgAddressV6 = prefs.getString("ipv6", "").orEmpty(),
-            serverPublicKey = relay.publicKey, clientSsid = wifiName, clientPassphrase = wifiPass, country = country,
+            serverPublicKey = relay.publicKey, clientSsid = wifiName, clientPassphrase = wifiPass, adminPassword = newAdminPassword, country = country,
             lanAddress = lan.address, lanPrefix = lan.prefix, relayHost = phoneLink(),
         )
         return Pair(plan, RouterScripts.validate(plan))
@@ -365,39 +370,38 @@ class RouterWizard(
                     )
                     return@execute
                 }
-                saveBackup(id, m["BACKUP_B64"])
                 done("Backed up, erased and rebuilt the router")
                 done("Your Wi-Fi: ${RouterScripts.wifiNames(wifiName).first} and ${RouterScripts.wifiNames(wifiName).second}")
-                watchTunnel(plan, id, relay, pw)
+                watchTunnel(plan, id, relay, plan.adminPassword)
             } catch (e: Exception) {
                 fail(friendly(e))
             }
         }
     }
 
-    /** Waits for the router to join the phone's network and the tunnel to answer, then confirms the change. */
+    /** Waits for the phone to join the router's link network and the tunnel to answer, then confirms the change. */
     private fun watchTunnel(plan: RouterPlan, id: RouterIdentity?, relay: MullvadApi.Relay, pw: String) {
         val deadline = System.currentTimeMillis() + 9 * 60_000L
-        say("The router is restarting its network and will join ${plan.phoneSsid}...")
+        say("The router is restarting its network. The phone will join ${plan.phoneSsid} automatically...")
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(6_000)
             val addr = (if (RelayRuntime.linkAddress() != null) Link.ROUTER_IP else null)
-            if (addr == null) { say("Waiting for the router to join ${plan.phoneSsid} (it can take a minute)..."); continue }
+            if (addr == null) { say("Waiting for the phone to join ${plan.phoneSsid} (it can take a minute). If Android asks about a Wi-Fi suggestion, tap Allow."); continue }
             try {
                 val res = ssh(addr).run(addr, pw, RouterScripts.status(), timeoutMs = 20_000)
                 val age = RouterScripts.handshakeAgeSeconds(RouterScripts.parseMarkers(res.output))
                 if (age != null && age < 180) {
                     ssh(addr).run(addr, pw, RouterScripts.confirm(), timeoutMs = 20_000)
-                    done("Router joined the phone's network at $addr")
+                    done("Phone joined the router's link network (router at $addr)")
                     done("Tunnel to Mullvad is up (handshake ${age}s ago)")
                     savePairing(id, relay, pw)
                     main.post { finished = true; draw() }
                     log("Router setup confirmed")
                     return
                 }
-                say("Router is on the phone's network at $addr; waiting for the tunnel to Mullvad...")
+                say("Phone is on the link network; waiting for the tunnel to Mullvad...")
             } catch (e: Exception) {
-                say("Router joined at $addr; its admin login is not reachable yet (${friendly(e)})")
+                say("Phone is on the link network, but the router's admin login is not reachable yet (${friendly(e)})")
             }
         }
         fail("The tunnel did not come up in time. The router will put its old settings back by itself within a few minutes.")
@@ -425,16 +429,6 @@ class RouterWizard(
         main.post { onProfileChanged() }
     }
 
-    private fun saveBackup(id: RouterIdentity?, b64: String?) {
-        if (b64.isNullOrBlank()) { log("Router did not return an off-router backup"); return }
-        runCatching {
-            val dir = File(activity.filesDir, "router-backups").apply { mkdirs() }
-            val name = (id?.id ?: "router").replace(Regex("[^A-Za-z0-9._-]"), "_")
-            File(dir, "$name-${System.currentTimeMillis() / 1000}.tgz").writeBytes(Base64.decode(b64, Base64.DEFAULT))
-            log("Saved a copy of the router's original configuration on this phone")
-        }.onFailure { log("Could not save the router backup: ${it.message}") }
-    }
-
     // ---------------------------------------------------------------- Paired router
 
     private fun pairedCard(p: RouterProfile): View {
@@ -442,7 +436,7 @@ class RouterWizard(
         val info = ui.mono(
             "Router:     ${p.title}\nID:         ${p.shortId}\n" +
                 "Wi-Fi:      $w5\n            $w24\nRouter IP:  ${p.lanCidr.ifBlank { "unknown" }}\nLink network: ${p.linkSsid}\n" +
-                "VPN server: ${p.serverHost}${if (p.stale) "\n\nThe phone's network settings changed after setup; run setup again to update the router." else ""}",
+                "VPN server: ${p.serverHost}${if (p.stale) "\n\nThe link settings changed after setup; run setup again to update the router." else ""}",
             12f
         )
         val status = ui.mono(pairedStatus.ifBlank { "Tap Refresh status to check the tunnel." }, 12f)
@@ -465,7 +459,7 @@ class RouterWizard(
     private fun refreshStatus(p: RouterProfile) {
         val host = managementHost()
         val pw = storedPassword(p)
-        if (host == null) { pairedStatus = "The router is not on the Wi-Fi Direct network right now."; draw(); return }
+        if (host == null) { pairedStatus = "The phone has not joined the router's link network right now."; draw(); return }
         if (pw == null) { pairedStatus = "The admin password is not saved. Re-run setup to save it."; draw(); return }
         pairedStatus = "Checking $host..."; draw()
         worker.execute {
@@ -485,7 +479,7 @@ class RouterWizard(
         val p = profiles.active() ?: return done("No router is paired.")
         val host = managementHost()
         val pw = storedPassword(p)
-        if (host == null) return done("The router is not on the Wi-Fi Direct network right now, so it was not changed.")
+        if (host == null) return done("The phone has not joined the router's link network right now, so the router was not changed.")
         if (pw == null) return done("The router's admin password is not saved, so it was not changed.")
         worker.execute {
             val msg = try {
@@ -507,7 +501,7 @@ class RouterWizard(
             problem = "To revert, the app needs the router's address and admin password (use the Router step)."; draw(); return
         }
         AlertDialog.Builder(activity).setTitle("Revert the router?")
-            .setMessage("The router's configuration goes back to exactly what it was before PhoneHop erased it. The phone's Wi-Fi Direct link will no longer be used.")
+            .setMessage("The router's configuration goes back to exactly what it was before PhoneHop erased it. The phone will no longer join the link network.")
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Revert") { _, _ ->
                 worker.execute {
@@ -525,7 +519,7 @@ class RouterWizard(
 
     private fun forget(p: RouterProfile) {
         AlertDialog.Builder(activity).setTitle("Forget this router?")
-            .setMessage("The router keeps its current settings. The phone forgets it, unlocks the Wi-Fi Direct settings and deletes the saved admin password.")
+            .setMessage("The router keeps its current settings. The phone forgets it, unlocks the link settings and deletes the saved admin password.")
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Forget") { _, _ ->
                 profiles.delete(p.id)

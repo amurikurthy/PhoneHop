@@ -68,10 +68,7 @@ class MainActivity : Activity() {
     private var lastLatencyAt = 0L
     private val profiles by lazy { ProfileStore(PrefsKeyValueStore(prefs)) }
     private lateinit var wizard: RouterWizard
-    private lateinit var lockNote: TextView
-    private lateinit var editButton: android.widget.Button
     private var lastLinkUp = false
-    private var editingGroup = false
     private lateinit var relayStatus: TextView
 
     private var autoServer = true
@@ -240,23 +237,23 @@ class MainActivity : Activity() {
         profiles.active()?.let { p ->
             prefs.edit().putString(PREF_SSID, p.linkSsid).putString(PREF_PASS, p.linkPassphrase).apply()
         }
-        ssidField = ui.field("PhoneHop-link", prefs.getString(PREF_SSID, null) ?: "PhoneHop-link")
-        ui.watch(ssidField) { prefs.edit().putString(PREF_SSID, it.trim()).apply(); applyLinkSoon() }
+        // Generated once and not editable: the router has these saved, and nothing else ever needs to join.
+        val savedSsid = prefs.getString(PREF_SSID, null) ?: "PhoneHop-link".also { prefs.edit().putString(PREF_SSID, it).apply() }
         val savedPass = prefs.getString(PREF_PASS, null)
             ?: PassphraseGenerator.generate(20).also { prefs.edit().putString(PREF_PASS, it).apply() }
-        passField = ui.field("8 to 63 characters", savedPass)
-        ui.watch(passField) { prefs.edit().putString(PREF_PASS, it).apply(); applyLinkSoon() }
+        ssidField = ui.field("", savedSsid).apply { isEnabled = false; alpha = 0.55f }
+        passField = ui.field("", savedPass).apply { isEnabled = false; alpha = 0.55f }
         linkStatus = ui.mono("Starting...")
-        lockNote = ui.caption("")
-        editButton = ui.secondary("Unlock to edit") { onEditLinkClicked() }
         content.addView(
             ui.card(
                 "Link to router",
-                "The router hosts a small hidden Wi-Fi network just for this phone. The phone joins it automatically, like a car's Wi-Fi, and keeps using cellular for its own internet.",
-                ui.labeled("Link network name", ssidField, "Only the router and this phone use it."),
-                ui.labeled("Link password", passField, "A strong one is generated. At least 8 characters."),
-                lockNote,
-                editButton,
+                "The router hosts a small hidden Wi-Fi network just for this phone. The phone joins it automatically, like a car's Wi-Fi, and keeps using cellular for its own internet. Nothing here needs configuring.",
+                ui.labeled("Link network name", ssidField, "Generated for you and not editable."),
+                ui.labeled("Link password", passField, "Random and not editable. Copy it if you ever need it."),
+                ui.secondary("Copy password") {
+                    getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Link password", passField.text.toString()))
+                    log("Link password copied to the clipboard")
+                },
                 linkStatus,
             ), ui.cardParams(20)
         )
@@ -413,6 +410,7 @@ class MainActivity : Activity() {
         // The page itself takes initial focus, so no text view (the log, a field) grabs it and scrolls the page.
         content.isFocusable = true
         content.isFocusableInTouchMode = true
+        content.revealOnFocusHint = false
         scroll = ScrollView(this).apply {
             isVerticalScrollBarEnabled = false
             addView(content, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -465,48 +463,11 @@ class MainActivity : Activity() {
 
     private fun dp(v: Int) = ui.dp(v)
 
-    /** While a router is paired it has the link network's name and password saved, so they are locked. */
+    /** If a router profile exists, show exactly what the router has saved. */
     private fun applyProfileLock() {
-        val p = profiles.active()
-        val locked = p != null && !editingGroup
-        ssidField.isEnabled = !locked
-        passField.isEnabled = !locked
-        listOf<View>(ssidField, passField).forEach { it.alpha = if (locked) 0.55f else 1f }
-        if (p != null && locked) {
-            if (ssidField.text.toString() != p.linkSsid) ssidField.setText(p.linkSsid)
-            if (passField.text.toString() != p.linkPassphrase) passField.setText(p.linkPassphrase)
-        }
-        lockNote.visibility = if (p != null) View.VISIBLE else View.GONE
-        lockNote.text = when {
-            p == null -> ""
-            editingGroup -> "Editing. The router has the old settings saved, so the phone will lose the link until you run its setup again."
-            p.stale -> "Locked to ${p.title} (${p.shortId}), but the router has older settings: run the router setup again."
-            else -> "Locked to ${p.title} (${p.shortId}). The router has these settings saved; changing them would cut the link."
-        }
-        editButton.visibility = if (p != null) View.VISIBLE else View.GONE
-        editButton.text = if (editingGroup) "Save and lock" else "Unlock to edit"
-    }
-
-    private fun onEditLinkClicked() {
         val p = profiles.active() ?: return
-        if (!editingGroup) {
-            android.app.AlertDialog.Builder(this)
-                .setTitle("Change the link network?")
-                .setMessage("${p.title} has the current name and password saved. If you change them, the phone loses the link until you run the router setup again.")
-                .setNegativeButton("Keep locked", null)
-                .setPositiveButton("Unlock") { _, _ -> editingGroup = true; applyProfileLock() }
-                .show()
-        } else {
-            val changed = ssidField.text.toString().trim() != p.linkSsid || passField.text.toString() != p.linkPassphrase
-            if (changed) {
-                profiles.save(p.copy(linkSsid = ssidField.text.toString().trim(), linkPassphrase = passField.text.toString(), stale = true))
-                log("Link network settings changed; the router needs updating")
-            }
-            editingGroup = false
-            applyProfileLock()
-            wizard.render()
-            applyLinkSoon(200)
-        }
+        if (ssidField.text.toString() != p.linkSsid) ssidField.setText(p.linkSsid)
+        if (passField.text.toString() != p.linkPassphrase) passField.setText(p.linkPassphrase)
     }
 
     private fun log(msg: String) = logAt(System.currentTimeMillis(), msg)
