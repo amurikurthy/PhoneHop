@@ -280,7 +280,7 @@ class RouterWizard(
             summary,
             ui.caption(
                 "This ERASES the router's whole configuration: Wi-Fi networks and passwords, port forwards, VPN and DHCP settings, " +
-                    "and the settings of installed packages. The router's LAN address returns to its default. " +
+                    "and the settings of installed packages. Its LAN address is replaced by the range you chose, so the router may move to a new address, and every device now connected to it will drop and have to join the new Wi-Fi names. " +
                     "The router keeps a backup of its old settings and puts them back by itself if the tunnel does not come up. " +
                     "Installed packages and the admin password are kept. If a safety check fails, nothing is changed."
             ),
@@ -536,6 +536,8 @@ class RouterWizard(
     private fun friendly(e: Exception): String = when (e) {
         is RouterSsh.AuthException -> "The router rejected that admin password."
         is RouterSsh.HostKeyChangedException -> e.message ?: "The router's SSH identity changed."
+        is com.jcraft.jsch.JSchException -> if (e.message.orEmpty().contains("time", true))
+            "The router did not answer in time. Make sure the phone is still on the router's Wi-Fi, then try again." else (e.message?.take(140) ?: "SSH error")
         is java.net.ConnectException, is java.net.SocketTimeoutException -> "Could not reach the router (is its SSH server on?)."
         else -> e.message?.take(140) ?: e.javaClass.simpleName
     }

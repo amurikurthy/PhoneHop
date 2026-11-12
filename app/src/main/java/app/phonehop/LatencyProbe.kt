@@ -46,7 +46,7 @@ object LatencyStats {
 
 /**
  * Measures round-trip time by timing TCP connection set-up, once every [intervalMs]:
- *  - "link": to the router over the Wi-Fi Direct link (its SSH port, which the setup leaves reachable from the phone)
+ *  - "link": to the router over the router link (its SSH port, which the setup leaves reachable from the phone)
  *  - "internet": to a Mullvad web server, over the same network the relay uses
  * Comparing the two shows which side a latency spike comes from.
  */

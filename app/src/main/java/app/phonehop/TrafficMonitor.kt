@@ -29,7 +29,7 @@ object TrafficMath {
 
 /**
  * Samples device-wide traffic once a second while started. "Cellular" is the mobile radio;
- * "Wi-Fi + Direct" is everything else (total minus mobile), which includes the Wi-Fi Direct
+ * "Wi-Fi + Direct" is everything else (total minus mobile), which includes the router link
  * group's interface. Per-interface counters are not available to normal apps, so this is
  * device-level; a relay running in this app can report exact figures later.
  */

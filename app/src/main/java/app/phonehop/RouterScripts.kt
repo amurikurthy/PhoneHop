@@ -55,8 +55,8 @@ object RouterScripts {
     /** Returns a human-readable problem with the plan, or null if it is fine. */
     fun validate(p: RouterPlan): String? {
         fun bad(s: String) = s.any { it.code < 32 || it.code == 127 }
-        if (p.phoneSsid.isBlank() || p.phoneSsid.length > 32 || bad(p.phoneSsid)) return "Wi-Fi Direct network name is not valid"
-        if (p.phonePassphrase.length !in 8..63 || bad(p.phonePassphrase)) return "Wi-Fi Direct password must be 8 to 63 characters"
+        if (p.phoneSsid.isBlank() || p.phoneSsid.length > 32 || bad(p.phoneSsid)) return "The link network name is not valid"
+        if (p.phonePassphrase.length !in 8..63 || bad(p.phonePassphrase)) return "The link password must be 8 to 63 characters"
         if (!BASE64_KEY.matches(p.wgPrivateKey)) return "WireGuard private key is not valid; register a key first"
         if (!BASE64_KEY.matches(p.serverPublicKey)) return "Server public key is not valid"
         if (!V4_CIDR.matches(p.wgAddressV4)) return "Tunnel IPv4 address is not valid; register a key first"

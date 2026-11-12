@@ -48,6 +48,7 @@ class MainActivity : Activity() {
     private lateinit var scroll: ScrollView
     private lateinit var logView: TextView
     private lateinit var linkStatus: TextView
+    private lateinit var statusView: TextView
     private lateinit var ssidField: EditText
     private lateinit var passField: EditText
     private lateinit var accountField: EditText
@@ -90,8 +91,11 @@ class MainActivity : Activity() {
             updateRelayStatus()
             updateLatency()
             updateLinkStatus()
+            updateStatusCard()
         }
         RelayRuntime.logSink = ::log
+        // Settings left over from the old Wi-Fi Direct design.
+        prefs.edit().remove("p2p_suffix").remove("p2p_pass").remove("p2p_band").apply()
         setContentView(buildUi())
         log("PhoneHop ${versionName()} on Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), ${Build.MANUFACTURER} ${Build.MODEL}")
         Updater.statusListener = { msg -> setUpdateStatus(msg) }
@@ -231,7 +235,12 @@ class MainActivity : Activity() {
 
     private fun buildUi(): View {
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        content.addView(ui.appTitle("PhoneHop", "Router relay to Mullvad"))
+        // Sections are collected as they are built, then added in the order a person would use them.
+        val placed = mutableListOf<Pair<View, ViewGroup.LayoutParams?>>()
+        fun place(v: View, p: ViewGroup.LayoutParams? = null) { placed += Pair(v, p) }
+        place(ui.appTitle("PhoneHop", "Router relay to Mullvad"))
+        statusView = ui.mono("Starting...", 12f)
+        place(ui.card("Status", null, statusView), ui.cardParams(20))
 
         // ---- Link to the router (values are saved so they survive leaving and returning to the app)
         profiles.active()?.let { p ->
@@ -244,7 +253,7 @@ class MainActivity : Activity() {
         ssidField = ui.field("", savedSsid).apply { isEnabled = false; alpha = 0.55f }
         passField = ui.field("", savedPass).apply { isEnabled = false; alpha = 0.55f }
         linkStatus = ui.mono("Starting...")
-        content.addView(
+        place(
             ui.card(
                 "Link to router",
                 "The router hosts a small hidden Wi-Fi network just for this phone. The phone joins it automatically, like a car's Wi-Fi, and keeps using cellular for its own internet. Nothing here needs configuring.",
@@ -261,8 +270,8 @@ class MainActivity : Activity() {
         // ---- Relay
         relayStatus = ui.mono("Starting...")
         relayPanel = TrafficPanel(this, "Relayed: router and Mullvad")
-        content.addView(
-            ui.card(
+        place(
+            ui.collapsible(
                 "Relay",
                 "Forwards the router's WireGuard traffic to the selected Mullvad server over the phone's internet connection. It only passes valid WireGuard packets from the router link.",
                 relayStatus,
@@ -281,10 +290,10 @@ class MainActivity : Activity() {
             prefs.edit().putInt(WifiLockMode.PREF, it).apply()
             KeepAliveService.applyWifiLockChoice(this)
         }
-        content.addView(
-            ui.card(
+        place(
+            ui.collapsible(
                 "Link quality",
-                "Round-trip time to the router over the router link (link) and to Mullvad over the phone's internet (internet), measured every 2 seconds, even with the screen off.",
+                "Round-trip time to the router over the link network (link) and to Mullvad over the phone's internet (internet), measured every 2 seconds, even with the screen off.",
                 latencyPanel,
                 latencySummary,
                 ui.labeled("Wi-Fi lock", lockSegmented, "Keeps the phone's Wi-Fi radio from power-saving. Try each and watch the graph; Low latency only works with the screen on."),
@@ -297,8 +306,8 @@ class MainActivity : Activity() {
         // ---- Live traffic
         wifiPanel = TrafficPanel(this, "Wi-Fi (router link)")
         cellPanel = TrafficPanel(this, "Cellular")
-        content.addView(
-            ui.card(
+        place(
+            ui.collapsible(
                 "Live traffic",
                 "Device-wide, updated every second while the app is open. Bright line is download, dim line is upload.",
                 wifiPanel,
@@ -325,7 +334,7 @@ class MainActivity : Activity() {
             ui.labeled("Country", ui.spinnerBox(countrySpinner)),
             ui.labeled("Server", ui.spinnerBox(serverSpinner)),
         ).apply { visibility = if (autoServer) View.GONE else View.VISIBLE }
-        content.addView(
+        place(
             ui.card(
                 "Mullvad",
                 "Used only to talk to Mullvad. Once it has worked it is remembered on this phone, encrypted with the Android Keystore, until you forget it. It is never logged.",
@@ -352,10 +361,7 @@ class MainActivity : Activity() {
                     ui.secondary("Refresh servers") { fetchServers() },
                     ui.primary("Register key") { registerKey() },
                 ),
-                ui.row(
-                    ui.danger("Remove my device") { removeMyDevice() },
-                    ui.secondary("Copy router config") { copyRouterConfig() },
-                ),
+                ui.danger("Remove this phone's key") { removeMyDevice() },
             ), ui.cardParams()
         )
 
@@ -372,20 +378,18 @@ class MainActivity : Activity() {
             registerKey = { registerKey() },
             onProfileChanged = { runOnUiThread { applyProfileLock(); wizard.render() } },
         )
-        content.addView(wizard.view, ui.cardParams())
-        wizard.render()
-        applyProfileLock()
+        place(wizard.view, ui.cardParams())
 
         // ---- Log
         logView = ui.mono("", 11f)
-        content.addView(
-            ui.card("Log", null, logView, ui.secondary("Clear log") { logView.text = "" }),
+        place(
+            ui.collapsible("Log", null, logView, ui.secondary("Clear log") { logView.text = "" }),
             ui.cardParams()
         )
 
         // ---- Updates
         updateStatus = ui.caption("Version ${updater.currentVersion()}")
-        content.addView(
+        place(
             ui.card(
                 "Updates", null,
                 updateStatus,
@@ -397,7 +401,7 @@ class MainActivity : Activity() {
         )
 
         // ---- Exit
-        content.addView(
+        place(
             ui.card(
                 "Exit",
                 "Leaves the link network, stops the background service and its notification, and closes the app.",
@@ -411,7 +415,19 @@ class MainActivity : Activity() {
         content.isFocusable = true
         content.isFocusableInTouchMode = true
         content.revealOnFocusHint = false
-        scroll = ScrollView(this).apply {
+        // Order of use: title, status, Mullvad (account, server, key), router setup, the link, the technical cards (folded), updates, exit.
+        // Built order: 0 title, 1 status, 2 link, 3 relay, 4 quality, 5 traffic, 6 mullvad, 7 router setup, 8 log, 9 updates, 10 exit.
+        check(placed.size == 11) { "unexpected number of sections: ${placed.size}" }
+        listOf(0, 1, 6, 7, 2, 3, 4, 5, 8, 9, 10).forEachIndexed { position, i ->
+            val (view, params) = placed[i]
+            // The first card under the title gets a little more room.
+            if (position == 1) content.addView(view, ui.cardParams(20))
+            else if (params != null) content.addView(view, params) else content.addView(view)
+        }
+        applyProfileLock()
+        wizard.render()
+
+        scroll = StableScrollView(this).apply {
             isVerticalScrollBarEnabled = false
             addView(content, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
@@ -642,6 +658,21 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- Mullvad account
 
+    private fun updateStatusCard() {
+        val st = RelayRuntime.stats
+        val heard = if (st.lastFromRouterAt == 0L) null else (System.currentTimeMillis() - st.lastFromRouterAt) / 1000
+        statusView.text = StatusSummary.build(
+            StatusSummary.In(
+                hasKey = prefs.getString("priv", null) != null,
+                serverName = selectedRelay?.hostname,
+                linkAddress = RelayRuntime.linkAddress()?.hostAddress,
+                routerTitle = profiles.active()?.title,
+                routerHeardSecondsAgo = heard,
+                relayedBytes = st.fromRouter.get() + st.toRouter.get(),
+            )
+        )
+    }
+
     private fun updateLatency() {
         val all = RelayRuntime.latency.snapshot()
         val last = all.lastOrNull() ?: return
@@ -736,31 +767,6 @@ class MainActivity : Activity() {
         MullvadApi.removeDevice(token, id)
         prefs.edit().remove("priv").remove("pub").remove("device_id").remove("ipv4").remove("ipv6").apply()
         log("Removed device $id")
-    }
-
-    private fun copyRouterConfig() {
-        val priv = prefs.getString("priv", null)
-        val ipv4 = prefs.getString("ipv4", null)
-        val ipv6 = prefs.getString("ipv6", null)
-        val relay = selectedRelay
-        if (priv == null || ipv4 == null) { log("Register a key first"); return }
-        if (relay == null) { log("No server selected yet"); return }
-        val cfg = """
-            [Interface]
-            PrivateKey = $priv
-            Address = $ipv4, $ipv6
-            DNS = 10.64.0.1
-
-            [Peer]
-            PublicKey = ${relay.publicKey}
-            AllowedIPs = 0.0.0.0/0, ::/0
-            Endpoint = 192.168.49.1:51820
-            PersistentKeepalive = 25
-        """.trimIndent()
-        getSystemService(ClipboardManager::class.java)
-            .setPrimaryClip(ClipData.newPlainText("WireGuard config", cfg))
-        log("Router config copied to clipboard (private key inside; paste it only into the router).\n" +
-            "  Phone relay would forward 192.168.49.1:51820 -> ${relay.ipv4}:51820")
     }
 
     private fun describe(e: Exception) = when (e) {

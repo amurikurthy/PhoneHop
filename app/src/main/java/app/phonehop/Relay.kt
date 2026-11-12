@@ -48,7 +48,7 @@ object WireGuardPacket {
  * WireGuard-encrypted end to end, so this never sees plaintext.
  *
  * @param listenAddress local address to listen on, asked again at every (re)bind; null means "not available
- *        yet" (the Wi-Fi Direct group is not up), so the relay waits. The group owner address in production
+ *        yet" (the router link is not up), so the relay waits. The group owner address in production
  * @param allowedSource decides which senders may use the relay; everyone else is dropped
  * @param openUpstream creates a fresh socket for talking to the server (on Android it is bound to the
  *        phone's internet network); called again after [rebindUpstream]
@@ -104,7 +104,7 @@ class Relay(
         stats.listening = null
     }
 
-    /** Call when the Wi-Fi Direct group is (re)created so the listener binds to the new interface. */
+    /** Call when the router link is (re)created so the listener binds to the new interface. */
     fun rebindListen() { listenSocket?.close() }
 
     /** Call when the phone's internet network changes; the old socket is no longer valid. */
@@ -126,7 +126,7 @@ class Relay(
                     soTimeout = 1000
                 }
             } catch (e: Exception) {
-                // Typically the Wi-Fi Direct group is not up yet; keep trying.
+                // Typically the router link is not up yet; keep trying.
                 stats.listening = null
                 sleep(1500)
                 continue

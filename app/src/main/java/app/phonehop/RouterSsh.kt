@@ -5,6 +5,7 @@ import com.jcraft.jsch.HostKey
 import com.jcraft.jsch.HostKeyRepository
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.JSchException
+import com.jcraft.jsch.Session
 import com.jcraft.jsch.UserInfo
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -36,6 +37,44 @@ class RouterSsh(
      * Passwords are only ever sent over the encrypted connection after the host key check.
      */
     fun run(host: String, password: String, script: String, user: String = "root", timeoutMs: Long = 60_000): Result {
+        val session = connectWithRetry(host, password, user)
+        try {
+            val channel = session.openChannel("exec") as com.jcraft.jsch.ChannelExec
+            channel.setCommand("sh -s")
+            channel.setInputStream(ByteArrayInputStream(script.toByteArray()))
+            val out = ByteArrayOutputStream()
+            channel.setOutputStream(out)
+            channel.setErrStream(out)
+            channel.connect(10_000)
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (!channel.isClosed && System.currentTimeMillis() < deadline) Thread.sleep(50)
+            val closed = channel.isClosed
+            val exit = if (closed) channel.exitStatus else -1
+            channel.disconnect()
+            return Result(exit, out.toString("UTF-8").also { if (!closed) log("Router command timed out") })
+        } finally {
+            session.disconnect()
+        }
+    }
+
+    /** The router can be slow to answer right after joining its Wi-Fi, so connection timeouts are retried. */
+    private fun connectWithRetry(host: String, password: String, user: String): Session {
+        var last: JSchException? = null
+        for (attempt in 1..3) {
+            try {
+                return connectOnce(host, password, user)
+            } catch (e: JSchException) {
+                val m = e.message.orEmpty()
+                if (!(m.contains("timed out", true) || m.contains("timeout", true))) throw e
+                last = e
+                log("The router did not answer (attempt $attempt of 3)")
+                if (attempt < 3) Thread.sleep(2_000)
+            }
+        }
+        throw last!!
+    }
+
+    private fun connectOnce(host: String, password: String, user: String): Session {
         val jsch = JSch()
         jsch.hostKeyRepository = TofuRepository(store, log)
         val session = jsch.getSession(user, host, port)
@@ -59,32 +98,16 @@ class RouterSsh(
             override fun showMessage(m: String?) {}
         }
         try {
-            session.connect(10_000)
+            session.connect(20_000)
         } catch (e: JSchException) {
             val m = e.message.orEmpty()
             when {
                 m.contains("Auth fail", true) || m.contains("Auth cancel", true) -> throw AuthException()
                 m.contains("HostKey", true) -> throw HostKeyChangedException(host)
-                else -> throw e
+                else -> { session.disconnect(); throw e }
             }
         }
-        try {
-            val channel = session.openChannel("exec") as com.jcraft.jsch.ChannelExec
-            channel.setCommand("sh -s")
-            channel.setInputStream(ByteArrayInputStream(script.toByteArray()))
-            val out = ByteArrayOutputStream()
-            channel.setOutputStream(out)
-            channel.setErrStream(out)
-            channel.connect(10_000)
-            val deadline = System.currentTimeMillis() + timeoutMs
-            while (!channel.isClosed && System.currentTimeMillis() < deadline) Thread.sleep(50)
-            val closed = channel.isClosed
-            val exit = if (closed) channel.exitStatus else -1
-            channel.disconnect()
-            return Result(exit, out.toString("UTF-8").also { if (!closed) log("Router command timed out") })
-        } finally {
-            session.disconnect()
-        }
+        return session
     }
 
     /** Forgets every saved router identity. */

@@ -15,7 +15,7 @@ import android.os.PowerManager
 
 /**
  * Foreground service that keeps the process alive with the screen off, so we can test whether
- * the Wi-Fi Direct group survives in the background. Holds a partial wake lock and a
+ * the router link survives in the background. Holds a partial wake lock and a
  * low-latency Wi-Fi lock for as long as it runs.
  */
 class KeepAliveService : Service() {

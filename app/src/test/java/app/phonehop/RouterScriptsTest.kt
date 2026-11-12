@@ -279,10 +279,17 @@ class RouterScriptsTest {
         assertEquals(listOf("100"), r.get("dhcp.lan.start"))
         assertEquals(listOf("150"), r.get("dhcp.lan.limit"))
         assertTrue(out, out.contains("PHONEHOP_LAN=192.168.50.1/255.255.255.0"))
-        // --- the link: a /30 with one lease; gateway and DNS point at the router (Android needs both)
+        // --- 5 GHz uses a fixed non-DFS channel; 2.4 GHz stays automatic
+        assertEquals(listOf("36"), r.get("wireless.radio1.channel"))
+        assertNull(r.get("wireless.radio0.channel"))
+        // --- the link zone rejects input, so DHCP must be explicitly allowed or the phone can never get an address
+        assertEquals(listOf("phonelink"), r.get("firewall.phonehop_dhcp.src"))
+        assertEquals(listOf("67"), r.get("firewall.phonehop_dhcp.dest_port"))
+        assertEquals(listOf("ACCEPT"), r.get("firewall.phonehop_dhcp.target"))
+        // --- the link: a /30 with one lease and (for now) no gateway or DNS
         assertEquals(listOf("192.168.51.1"), r.get("network.phonelink.ipaddr"))
         assertEquals(listOf("1"), r.get("dhcp.phonelink.limit"))
-        assertEquals(listOf("3,192.168.51.1", "6,192.168.51.1"), r.get("dhcp.phonelink.dhcp_option"))
+        assertEquals(listOf("3", "6"), r.get("dhcp.phonelink.dhcp_option")) // experiment: no gateway, no DNS
         // --- tunnel points at the phone
         assertEquals(listOf("wireguard"), r.get("network.mullvad.proto"))
         assertEquals(listOf("10.66.1.2/32", "fc00:bbbb:bbbb:bb01::2:102/128"), r.get("network.mullvad.addresses"))
@@ -464,7 +471,7 @@ class RouterScriptsTest {
         assertEquals(listOf("192.168.51.1"), r.get("network.phonelink.ipaddr"))
         assertEquals(listOf("255.255.255.252"), r.get("network.phonelink.netmask"))
         assertEquals(listOf("1"), r.get("dhcp.phonelink.limit"))
-        assertEquals(listOf("3,192.168.51.1", "6,192.168.51.1"), r.get("dhcp.phonelink.dhcp_option"))
+        assertEquals(listOf("3", "6"), r.get("dhcp.phonelink.dhcp_option")) // experiment: no gateway, no DNS
         // the tunnel's endpoint is the phone's fixed address; only the phone may SSH in over the link
         assertEquals(listOf("192.168.51.2"), r.get("network.mullvad_peer.endpoint_host"))
         assertEquals(listOf("phonelink"), r.get("firewall.phonehop_ssh.src"))

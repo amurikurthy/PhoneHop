@@ -2,7 +2,7 @@ package app.phonehop
 
 import java.net.InetAddress
 
-/** IPv4 subnet membership, used to accept relay traffic only from the Wi-Fi Direct group. */
+/** IPv4 subnet membership, used to accept relay traffic only from the router link. */
 object Subnet {
     fun contains(base: InetAddress, prefixLength: Int, candidate: InetAddress): Boolean {
         val a = base.address

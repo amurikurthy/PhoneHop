@@ -18,7 +18,7 @@ import java.net.InetAddress
 import java.net.NetworkInterface
 
 /**
- * Owns the single [Relay] while the keep-alive service runs: listens on the Wi-Fi Direct
+ * Owns the single [Relay] while the keep-alive service runs: listens on the router link
  * group's address, and sends to the VPN server over whatever network the phone currently uses
  * for internet (usually cellular), following it as it changes.
  */

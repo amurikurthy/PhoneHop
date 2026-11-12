@@ -13,7 +13,7 @@ import javax.net.SocketFactory
 /**
  * Finds where the router is. A phone that has joined the router's Wi-Fi (or Ethernet) is told the
  * router's address by Android as its default gateway, so no scanning is needed. Once the router is
- * on the Wi-Fi Direct link, the relay learns its address from its WireGuard packets.
+ * on the router link, the relay learns its address from its WireGuard packets.
  */
 object RouterDiscovery {
     data class Candidate(val host: String, val network: Network?, val source: String)

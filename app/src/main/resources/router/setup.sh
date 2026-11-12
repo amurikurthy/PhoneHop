@@ -108,6 +108,8 @@ echo "PHONEHOP_RADIO=$RADIO ($RBAND)"
 for r in $(uci show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p'); do
   u set "wireless.$r.disabled=0"
   [ -n "$COUNTRY" ] && u set "wireless.$r.country=$COUNTRY"
+  # 5 GHz: a fixed non-DFS channel. "auto" can pick a DFS channel, which waits for radar checks and may never start.
+  [ "$(radio_band "$r")" = 5g ] && u set "wireless.$r.channel=36"
 done
 
 # ---- 4. CLIENT mode: the router hosts a hidden network just for the phone.
@@ -169,8 +171,10 @@ u set dhcp.phonelink.interface=phonelink
 u set dhcp.phonelink.start=2
 u set dhcp.phonelink.limit=1
 u set dhcp.phonelink.leasetime=12h
-u add_list dhcp.phonelink.dhcp_option=3,192.168.51.1
-u add_list dhcp.phonelink.dhcp_option=6,192.168.51.1
+# EXPERIMENT: hand out NO gateway and NO DNS. If Android answers "IP configuration failure", use
+# dhcp_option=3,192.168.51.1 and dhcp_option=6,192.168.51.1 instead.
+u add_list dhcp.phonelink.dhcp_option=3
+u add_list dhcp.phonelink.dhcp_option=6
 
 # ---- 6. WireGuard tunnel to the VPN server, with the phone as the UDP endpoint.
 ud network.mullvad_peer
@@ -195,6 +199,7 @@ u add_list network.mullvad_peer.allowed_ips=::/0
 ud firewall.phonehop_vpn
 ud firewall.phonehop_lan_vpn
 ud firewall.phonehop_ssh
+ud firewall.phonehop_dhcp
 ud firewall.phonehop_linkzone
 u set firewall.phonehop_vpn=zone
 u set firewall.phonehop_vpn.name=vpn
@@ -227,6 +232,13 @@ u set "firewall.phonehop_ssh.src_ip=$PHONE_ADDR"
 u set firewall.phonehop_ssh.dest_port=22
 u set firewall.phonehop_ssh.proto=tcp
 u set firewall.phonehop_ssh.target=ACCEPT
+# The link zone rejects everything else, including DHCP, so the phone could never get its address without this.
+u set firewall.phonehop_dhcp=rule
+u set firewall.phonehop_dhcp.name=PhoneHop-DHCP
+u set firewall.phonehop_dhcp.src=phonelink
+u set firewall.phonehop_dhcp.proto=udp
+u set firewall.phonehop_dhcp.dest_port=67
+u set firewall.phonehop_dhcp.target=ACCEPT
 
 # ---- 8. DNS only through the tunnel; SSH reachable on the phone link (not just the LAN).
 ud "dhcp.@dnsmasq[0].server"

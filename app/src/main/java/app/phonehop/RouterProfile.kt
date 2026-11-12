@@ -18,7 +18,7 @@ data class RouterIdentity(val model: String, val board: String, val firmware: St
 }
 
 /**
- * A router that has been set up for this phone, with the Wi-Fi Direct network it was given.
+ * A router that has been set up for this phone, with the router link network it was given.
  * While a profile is active the group settings are locked, because the router has them saved.
  */
 data class RouterProfile(
@@ -74,7 +74,7 @@ class ProfileStore(private val kv: KeyValueStore) {
             val i = it.indexOf('=')
             if (i < 0) null else it.substring(0, i) to URLDecoder.decode(it.substring(i + 1), "UTF-8")
         }.toMap()
-        if (m["lm"] != "client") return null // set up the old Wi-Fi Direct way: it has to be set up again
+        if (m["lm"] != "client") return null // set up the old router link way: it has to be set up again
         return try {
             RouterProfile(
                 id = m.getValue("id"), model = m["model"].orEmpty(), mac = m["mac"].orEmpty(), serial = m["serial"].orEmpty(),

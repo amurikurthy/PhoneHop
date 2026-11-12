@@ -88,6 +88,15 @@ class QuietTextView(context: Context) : TextView(context) {
     override fun bringPointIntoView(offset: Int): Boolean = false
 }
 
+/**
+ * A ScrollView that never scrolls by itself to reveal a view that just got focus or changed. Android does that after a
+ * card is redrawn or a log line is added, which threw the page far away from what was just tapped. Finger scrolling and
+ * the explicit keyboard handling in the activity are not affected.
+ */
+class StableScrollView(context: Context) : android.widget.ScrollView(context) {
+    override fun computeScrollDeltaToGetChildRectOnScreen(rect: android.graphics.Rect): Int = 0
+}
+
 /** View factory for the screen's building blocks. */
 class Ui(private val ctx: Context) {
     private val medium = Typeface.create("sans-serif-medium", Typeface.NORMAL)
@@ -143,6 +152,38 @@ class Ui(private val ctx: Context) {
         addView(TextView(ctx).apply { text = title; textSize = 18f; setTextColor(Glass.TEXT); typeface = medium })
         if (subtitle != null) addView(caption(subtitle), lp(dp(2)))
         children.forEach { addView(it, lp(dp(12))) }
+    }
+
+    /** A card that starts folded; tapping its title opens it. For technical details that most days nobody needs. */
+    fun collapsible(title: String, subtitle: String?, vararg children: View, expanded: Boolean = false): View {
+        val body = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = if (expanded) View.VISIBLE else View.GONE
+            if (subtitle != null) addView(caption(subtitle), lp())
+            children.forEach { addView(it, lp(dp(12))) }
+        }
+        val arrow = TextView(ctx).apply { text = if (expanded) "\u25BE" else "\u25B8"; textSize = 18f; setTextColor(Glass.TEXT_2) }
+        val header = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true
+            addView(TextView(ctx).apply { text = title; textSize = 18f; setTextColor(Glass.TEXT); typeface = medium },
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(arrow)
+            setOnClickListener {
+                val open = body.visibility != View.VISIBLE
+                body.visibility = if (open) View.VISIBLE else View.GONE
+                arrow.text = if (open) "\u25BE" else "\u25B8"
+            }
+        }
+        return LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(16), dp(18), dp(16))
+            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(Glass.CARD_TOP, Glass.CARD_BOTTOM))
+                .apply { cornerRadius = dp(22).toFloat(); setStroke(dp(1), Glass.STROKE) }
+            addView(header)
+            addView(body, lp(dp(12)))
+        }
     }
 
     fun cardParams(top: Int = 16) = lp(dp(top))
