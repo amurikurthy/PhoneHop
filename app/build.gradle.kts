@@ -23,8 +23,8 @@ android {
         minSdk = 29
         targetSdk = 35
         // CI passes these from the git tag (v1.2.3 -> name 1.2.3, code 10203).
-        versionName = (findProperty("versionName") as String?) ?: "0.3.0"
-        versionCode = ((findProperty("versionCode") as String?) ?: "300").toInt()
+        versionName = (findProperty("versionName") as String?) ?: "0.4.0"
+        versionCode = ((findProperty("versionCode") as String?) ?: "400").toInt()
     }
 
     signingConfigs {
@@ -52,5 +52,11 @@ android {
 }
 
 dependencies {
+    // SSH client used to configure the router (maintained fork of JSch with modern algorithms).
+    implementation("com.github.mwiede:jsch:0.2.20")
+
     testImplementation("junit:junit:4.13.2")
+    // Embedded SSH server so the client can be tested without a router.
+    testImplementation("org.apache.sshd:sshd-core:2.12.1")
+    testImplementation("org.slf4j:slf4j-nop:2.0.13")
 }

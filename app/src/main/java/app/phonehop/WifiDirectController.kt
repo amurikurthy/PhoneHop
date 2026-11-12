@@ -9,6 +9,7 @@ import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pGroup
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
+import android.os.Handler
 import android.os.Looper
 
 /**
@@ -77,24 +78,56 @@ class WifiDirectController(
     /** Builds the full SSID. Android requires "DIRECT-" followed by two characters and a dash. */
     fun fullSsid(suffix: String) = "DIRECT-ph-$suffix"
 
-    fun createGroup(suffix: String, passphrase: String, band: Band) {
-        val ch = channel ?: run { log("Not initialised"); return }
-        if (suffix.isBlank()) { log("Name suffix is empty"); return }
-        if (passphrase.length !in 8..63) { log("Passphrase must be 8-63 characters"); return }
-        val ssid = fullSsid(suffix)
-        // A leftover group (from a previous run) blocks creation, so clear it first.
+    private data class Wanted(val ssid: String, val passphrase: String, val band: Band)
+
+    private val handler = Handler(Looper.getMainLooper())
+    private var wanted: Wanted? = null
+    private var creatingUntil = 0L
+    private var retries = 0
+    private var recreatePending = false
+
+    /**
+     * Makes the real Wi-Fi Direct group match this config. If a group with the same name and
+     * password is already up (and was requested on the same band) nothing happens; otherwise the
+     * old group is replaced. Returns a reason if the config is not usable yet, else null.
+     */
+    fun ensureGroup(suffix: String, passphrase: String, band: Band): String? {
+        if (suffix.isBlank()) return "Enter a network name"
+        if (suffix.length > 20) return "Network name is too long (max 20 characters)"
+        if (passphrase.length !in 8..63) return "Password must be 8 to 63 characters"
+        val w = Wanted(fullSsid(suffix.trim()), passphrase, band)
+        wanted = w
+        retries = 0
+        val ch = channel ?: return "Wi-Fi Direct is not ready yet"
+        manager.requestGroupInfo(ch) { group ->
+            val sameBand = lastBand == null || lastBand == w.band
+            if (group != null && group.networkName == w.ssid && group.passphrase == w.passphrase && sameBand) {
+                onGroup(group) // already what we want
+            } else {
+                create(ch, w)
+            }
+        }
+        return null
+    }
+
+    private var lastBand: Band? = null
+
+    private fun create(ch: WifiP2pManager.Channel, w: Wanted) {
+        creatingUntil = System.currentTimeMillis() + 10_000
+        lastBand = w.band
+        // A leftover group blocks creation, so clear it first.
         manager.requestGroupInfo(ch) { existing ->
             if (existing != null) {
-                log("Removing existing group ${existing.networkName} first")
+                log("Replacing group ${existing.networkName}")
                 manager.removeGroup(ch, object : WifiP2pManager.ActionListener {
-                    override fun onSuccess() = doCreate(ch, ssid, passphrase, band)
+                    override fun onSuccess() = doCreate(ch, w.ssid, w.passphrase, w.band)
                     override fun onFailure(reason: Int) {
                         log("removeGroup failed: ${reasonText(reason)}")
-                        doCreate(ch, ssid, passphrase, band)
+                        doCreate(ch, w.ssid, w.passphrase, w.band)
                     }
                 })
             } else {
-                doCreate(ch, ssid, passphrase, band)
+                doCreate(ch, w.ssid, w.passphrase, w.band)
             }
         }
     }
@@ -114,32 +147,49 @@ class WifiDirectController(
         log("Creating group $ssid (${band.label})...")
         manager.createGroup(ch, config, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
-                log("createGroup accepted; waiting for group info")
-                refresh()
+                log("Group requested; waiting for it to come up")
+                handler.postDelayed({ refresh() }, 1_000)
             }
             override fun onFailure(reason: Int) {
                 if (band == Band.GHZ_5 && mayFallBack) {
                     log("5 GHz group failed (${reasonText(reason)}); retrying on 2.4 GHz")
                     doCreate(ch, ssid, passphrase, Band.GHZ_2_4, mayFallBack = false)
                 } else {
-                    log("createGroup failed: ${reasonText(reason)}")
+                    log("Could not create the group: ${reasonText(reason)}")
+                    scheduleRecreate()
                 }
             }
         })
     }
 
-    /** Tears the group down; [onDone] runs once the system has answered (or after a short timeout). */
+    /** If the group vanished (Wi-Fi toggled, system cleanup) bring it back, a few times at most. */
+    private fun scheduleRecreate() {
+        val w = wanted ?: return
+        if (recreatePending || retries >= 5) return
+        recreatePending = true
+        retries++
+        handler.postDelayed({
+            recreatePending = false
+            val ch = channel
+            if (wanted == w && ch != null) {
+                log("Recreating the group (attempt $retries)")
+                create(ch, w)
+            }
+        }, 3_000L * retries)
+    }
+
+    /** Tears the group down for good (used when quitting); [onDone] runs once the system answers. */
     fun removeGroup(onDone: (() -> Unit)? = null) {
+        wanted = null // do not bring it back
         val ch = channel
         if (ch == null) { onDone?.invoke(); return }
         val finished = java.util.concurrent.atomic.AtomicBoolean(false)
         fun done() { if (finished.compareAndSet(false, true)) onDone?.invoke() }
-        android.os.Handler(Looper.getMainLooper()).postDelayed({ done() }, 2_000)
+        handler.postDelayed({ done() }, 2_000)
         manager.removeGroup(ch, object : WifiP2pManager.ActionListener {
             override fun onSuccess() { log("Group removed"); onGroup(null); done() }
             override fun onFailure(reason: Int) {
                 // Failing because there is no group is fine when we are just cleaning up.
-                if (onDone == null) log("removeGroup failed: ${reasonText(reason)}")
                 done()
             }
         })
@@ -147,7 +197,14 @@ class WifiDirectController(
 
     fun refresh() {
         val ch = channel ?: return
-        manager.requestGroupInfo(ch) { group -> onGroup(group) }
+        manager.requestGroupInfo(ch) { group ->
+            onGroup(group)
+            if (group != null) {
+                retries = 0
+            } else if (wanted != null && System.currentTimeMillis() > creatingUntil) {
+                scheduleRecreate()
+            }
+        }
     }
 
     private fun reasonText(r: Int) = when (r) {

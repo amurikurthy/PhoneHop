@@ -203,6 +203,49 @@ class Ui(private val ctx: Context) {
         if (number) inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
     }
 
+    /**
+     * A text/number field whose contents are hidden until the eye button is tapped.
+     * Returns the container to add to a layout and the EditText to read from.
+     */
+    fun secretField(hint: String, number: Boolean): Pair<View, EditText> {
+        val field = EditText(ctx).apply {
+            this.hint = hint
+            textSize = 16f
+            setTextColor(Glass.TEXT)
+            setHintTextColor(Color.parseColor("#80A3ABBA"))
+            background = glassFill(14)
+            setPadding(dp(16), dp(14), dp(52), dp(14))
+        }
+        val eye = ImageView(ctx).apply {
+            setColorFilter(Glass.TEXT_2)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            isClickable = true
+            isFocusable = false
+        }
+        var shown = false
+        fun apply() {
+            val cls = if (number) InputType.TYPE_CLASS_NUMBER else InputType.TYPE_CLASS_TEXT
+            val variation = when {
+                number && shown -> InputType.TYPE_NUMBER_VARIATION_NORMAL
+                number -> InputType.TYPE_NUMBER_VARIATION_PASSWORD
+                shown -> InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                else -> InputType.TYPE_TEXT_VARIATION_PASSWORD
+            }
+            field.inputType = cls or variation
+            field.setSingleLine()
+            field.setSelection(field.text.length)
+            eye.setImageResource(if (shown) R.drawable.ic_eye_off else R.drawable.ic_eye)
+            eye.contentDescription = if (shown) "Hide" else "Show"
+        }
+        apply()
+        eye.setOnClickListener { shown = !shown; apply() }
+        val box = FrameLayout(ctx).apply {
+            addView(field, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(eye, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.END or Gravity.CENTER_VERTICAL))
+        }
+        return Pair(box, field)
+    }
+
     fun toggle(text: String, checked: Boolean, onChange: (Boolean) -> Unit) = Switch(ctx).apply {
         this.text = text
         textSize = 15f

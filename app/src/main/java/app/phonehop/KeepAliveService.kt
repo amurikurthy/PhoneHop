@@ -66,10 +66,12 @@ class KeepAliveService : Service() {
             wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "PhoneHop:wifi")
                 .apply { setReferenceCounted(false); acquire() }
         }
+        RelayRuntime.start(applicationContext)
         return START_STICKY
     }
 
     override fun onDestroy() {
+        RelayRuntime.stop()
         wakeLock?.takeIf { it.isHeld }?.release()
         wifiLock?.takeIf { it.isHeld }?.release()
         wakeLock = null

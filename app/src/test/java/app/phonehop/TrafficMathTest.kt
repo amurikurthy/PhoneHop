@@ -20,4 +20,11 @@ class TrafficMathTest {
         assertEquals("12.4 Mbps", TrafficMath.formatRate(12_400_000.0))
         assertEquals("1.50 Gbps", TrafficMath.formatRate(1_500_000_000.0))
     }
+
+    @Test fun formatsByteTotals() {
+        assertEquals("512 B", TrafficMath.formatBytes(512))
+        assertEquals("1.5 KB", TrafficMath.formatBytes(1536))
+        assertEquals("8.4 MB", TrafficMath.formatBytes(8_808_038))
+        assertEquals("2.00 GB", TrafficMath.formatBytes(2L * 1024 * 1024 * 1024))
+    }
 }
