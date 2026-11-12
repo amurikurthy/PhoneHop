@@ -196,6 +196,11 @@ u add_list network.mullvad_peer.allowed_ips=0.0.0.0/0
 u add_list network.mullvad_peer.allowed_ips=::/0
 
 # ---- 7. Firewall: clients may only leave through the tunnel (the kill switch).
+# Flow offloading: after a connection's first packets, forward it on a fast path that skips most firewall work.
+# The hardware option is used where the chip supports it; on others (like the QCA9531 in the AR750S) the
+# router quietly uses the software fast path instead. The first packets still go through the kill-switch rules.
+u set "firewall.@defaults[0].flow_offloading=1"
+u set "firewall.@defaults[0].flow_offloading_hw=1"
 ud firewall.phonehop_vpn
 ud firewall.phonehop_lan_vpn
 ud firewall.phonehop_ssh
@@ -245,6 +250,42 @@ ud "dhcp.@dnsmasq[0].server"
 u add_list "dhcp.@dnsmasq[0].server=$DNS"
 u set "dhcp.@dnsmasq[0].noresolv=1"
 ud "dropbear.@dropbear[0].Interface"
+
+# ---- 8b. Queue management (anti-bufferbloat). The phone's cellular link buffers heavily, so under load every
+# packet waits behind a long queue. Shaping slightly below the real speed keeps the queue here, where
+# fq_codel/cake drops early and keeps delay low. Tune the two rates in /etc/phonehop-sqm.conf.
+ETC=${PH_ETC:-/etc}
+cat > "$ETC/phonehop-sqm.conf" <<'SQMCONF'
+# Megabits per second. Set these to roughly 85-90% of what the cellular link really delivers.
+DOWN=30   # internet -> your devices
+UP=10     # your devices -> internet
+SQMCONF
+cat > "$ETC/phonehop-sqm.sh" <<'SQMSH'
+#!/bin/sh
+# Runs on every firewall reload (so after boot and after interface changes). Never fails the reload.
+command -v tc >/dev/null 2>&1 || exit 0
+DOWN=30; UP=10
+[ -f /etc/phonehop-sqm.conf ] && . /etc/phonehop-sqm.conf
+shape() { # device, megabits
+  dev=$1; rate=$2
+  [ -d "/sys/class/net/$dev" ] || return 0
+  tc qdisc del dev "$dev" root 2>/dev/null
+  if tc qdisc replace dev "$dev" root cake bandwidth "${rate}mbit" besteffort nat 2>/dev/null; then return 0; fi
+  tc qdisc replace dev "$dev" root handle 1: htb default 10 2>/dev/null &&
+    tc class replace dev "$dev" parent 1: classid 1:10 htb rate "${rate}mbit" ceil "${rate}mbit" 2>/dev/null &&
+    tc qdisc replace dev "$dev" parent 1:10 fq_codel 2>/dev/null
+  return 0
+}
+shape mullvad "$UP"      # toward the internet, via the phone
+shape br-lan "$DOWN"     # toward your devices
+exit 0
+SQMSH
+chmod +x "$ETC/phonehop-sqm.sh"
+ud firewall.phonehop_sqm
+u set firewall.phonehop_sqm=include
+u set firewall.phonehop_sqm.type=script
+u set firewall.phonehop_sqm.path=/etc/phonehop-sqm.sh
+u set firewall.phonehop_sqm.fw4_compatible=1
 
 # ---- 9. Save and apply. Applying in the background lets this SSH session finish cleanly.
 for f in wireless network firewall dhcp dropbear; do

@@ -178,11 +178,12 @@ class RouterScriptsTest {
         val state = File(dir, "uci.state")
         val pristineFile = File(dir, "pristine.state")
         val cfg = File(dir, "config")
+        val etc = File(dir, "etc").also { it.mkdirs() }
         val rom = File(dir, "rom")
         val env = mutableMapOf(
             "FAKE_UCI_STATE" to state.path, "PH_CFG" to cfg.path, "PH_INITD" to File(dir, "initd").path,
             "PH_BK" to File(dir, "backup").path, "PH_REVERT" to File(dir, "revert.sh").path,
-            "PH_PENDING" to File(dir, "pending").path, "PH_ROM" to rom.path,
+            "PH_PENDING" to File(dir, "pending").path, "PH_ETC" to File(dir, "etc").path, "PH_ROM" to rom.path,
             "PH_CONFIG_GENERATE" to File(dir, "bin/config_generate").path,
             "PATH" to File(dir, "bin").path + ":" + System.getenv("PATH"),
         )
@@ -286,6 +287,11 @@ class RouterScriptsTest {
         assertEquals(listOf("phonelink"), r.get("firewall.phonehop_dhcp.src"))
         assertEquals(listOf("67"), r.get("firewall.phonehop_dhcp.dest_port"))
         assertEquals(listOf("ACCEPT"), r.get("firewall.phonehop_dhcp.target"))
+        assertEquals(listOf("1"), r.get("firewall.@defaults[0].flow_offloading"))
+        assertEquals(listOf("1"), r.get("firewall.@defaults[0].flow_offloading_hw"))
+        assertEquals(listOf("/etc/phonehop-sqm.sh"), r.get("firewall.phonehop_sqm.path"))
+        assertTrue(java.io.File(r.etc, "phonehop-sqm.sh").readText().contains("fq_codel"))
+        assertTrue(java.io.File(r.etc, "phonehop-sqm.conf").readText().contains("DOWN="))
         // --- the link: a /30 with one lease and (for now) no gateway or DNS
         assertEquals(listOf("192.168.51.1"), r.get("network.phonelink.ipaddr"))
         assertEquals(listOf("1"), r.get("dhcp.phonelink.limit"))
