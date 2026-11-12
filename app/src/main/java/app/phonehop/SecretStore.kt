@@ -74,6 +74,9 @@ class SecretStore(private val kv: KeyValueStore, private val cipher: SecretCiphe
     fun clearAccount() = kv.remove(ACCOUNT)
 
     /** Other named secrets (e.g. a router's admin password), stored the same way. */
+    /** The phone's WireGuard private key, kept encrypted like the other secrets. */
+    fun wgPrivateKey(): String? = get(WG_PRIVATE_KEY)
+
     fun put(name: String, value: String) { kv.put(NAMED + name, cipher.encrypt(value.toByteArray(Charsets.UTF_8))) }
 
     fun get(name: String): String? =
@@ -81,8 +84,9 @@ class SecretStore(private val kv: KeyValueStore, private val cipher: SecretCiphe
 
     fun clear(name: String) = kv.remove(NAMED + name)
 
-    private companion object {
-        const val ACCOUNT = "mullvad_account"
-        const val NAMED = "secret_"
+    companion object {
+        const val WG_PRIVATE_KEY = "wg_private_key"
+        private const val ACCOUNT = "mullvad_account"
+        private const val NAMED = "secret_"
     }
 }

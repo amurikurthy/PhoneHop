@@ -50,6 +50,8 @@ class MainActivity : Activity() {
     private lateinit var linkStatus: TextView
     private lateinit var statusView: TextView
     private lateinit var statusHero: Ui.StatusHero
+    private lateinit var mullvadMessage: TextView
+    private var lastMullvadMessage = ""
     private lateinit var ssidField: EditText
     private lateinit var passField: EditText
     private lateinit var accountField: EditText
@@ -71,6 +73,8 @@ class MainActivity : Activity() {
     private lateinit var relayStatus: TextView
 
     private var autoServer = true
+    private var autoToken = 0          // bumped whenever the server choice changes, so late results from an old search are ignored
+    private var quitting = false
     private var imeBottom = 0
     private var relayList: MullvadApi.RelayList? = null
     private var countryRelays: List<MullvadApi.Relay> = emptyList()
@@ -79,6 +83,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        quitting = false
+        getSharedPreferences("phonehop", MODE_PRIVATE).edit().putBoolean(KeepAliveService.PREF_USER_QUIT, false).apply()
         if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false)
         monitor = TrafficMonitor(
             relayTotals = { Pair(RelayRuntime.stats.toRouter.get(), RelayRuntime.stats.fromRouter.get()) }
@@ -91,6 +97,10 @@ class MainActivity : Activity() {
             updateStatusCard()
         }
         RelayRuntime.logSink = ::log
+        // Older versions kept the WireGuard private key as plain text; move it into the encrypted store.
+        prefs.getString("priv", null)?.let { old ->
+            runCatching { secrets.put(SecretStore.WG_PRIVATE_KEY, old) }.onSuccess { prefs.edit().remove("priv").apply() }
+        }
         // Settings left over from the old Wi-Fi Direct design and from the removed latency experiments.
         prefs.edit().remove("p2p_suffix").remove("p2p_pass").remove("p2p_band").remove("keep_warm").remove("wifi_lock_mode").apply()
         setContentView(buildUi())
@@ -104,6 +114,7 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
+        if (quitting) return
         LinkRuntime.start(applicationContext)
         applyLinkSoon(500)
         updateBatteryUi()
@@ -157,12 +168,25 @@ class MainActivity : Activity() {
     /** Leaves the link network, stops the service (clearing its notification) and closes the app completely. */
     private fun quit() {
         log("Quitting: leaving the link network and stopping the background service")
+        quitting = true
+        // Remembered on disk: if Android restarts the (sticky) service after the process dies, it must stay stopped.
+        prefs.edit().putBoolean(KeepAliveService.PREF_USER_QUIT, true).commit()
+        uiHandler.removeCallbacksAndMessages(null)   // pending link joins, server retries
+        monitor.stop()
         LinkRuntime.remove()
         KeepAliveService.stop(this)
-        monitor.stop()
+        RelayRuntime.stop()
         finishAndRemoveTask()
-        // Nothing is left running, so end the process too rather than leaving it cached.
-        Handler(Looper.getMainLooper()).postDelayed({ Process.killProcess(Process.myPid()) }, 300)
+        // End the process once the service has really stopped (or after two seconds at most), so nothing is left cached
+        // or restarted.
+        val started = System.currentTimeMillis()
+        val mainHandler = Handler(Looper.getMainLooper())
+        mainHandler.post(object : Runnable {
+            override fun run() {
+                if (KeepAliveService.running && System.currentTimeMillis() - started < 2_000) mainHandler.postDelayed(this, 100)
+                else Process.killProcess(Process.myPid())
+            }
+        })
     }
 
     // ---------------------------------------------------------------- Updates
@@ -304,6 +328,7 @@ class MainActivity : Activity() {
         accountField = account
         runCatching { secrets.account() }.getOrNull()?.let { account.setText(it) }
         accountSavedNote = ui.caption("")
+        mullvadMessage = ui.caption("").apply { visibility = View.GONE; textSize = 13.5f }
         forgetAccountButton = ui.danger("Forget saved account number") {
             secrets.clearAccount()
             accountField.setText("")
@@ -326,16 +351,22 @@ class MainActivity : Activity() {
                 accountSavedNote,
                 forgetAccountButton,
                 ui.row(
-                    ui.secondary("Check account") { withToken { t -> log("Account expires: ${MullvadApi.accountExpiry(t)}") } },
+                    ui.secondary("Check account") { withToken { t -> val e = MullvadApi.accountExpiry(t); log("Account expires: $e"); tell("Account is valid. It expires $e.") } },
                     ui.secondary("List devices") { listDevices() },
                 ),
+                mullvadMessage,
                 ui.labeled(
                     "Server selection",
                     ui.segmented(listOf("Auto (nearest)", "Manual"), if (autoServer) 0 else 1) { i ->
                         autoServer = i == 0
                         prefs.edit().putBoolean(PREF_AUTO, autoServer).apply()
                         manualBox.visibility = if (autoServer) View.GONE else View.VISIBLE
-                        if (autoServer) relayList?.let { autoSelect(it) } else restoreManualSelection()
+                        autoToken++ // any search still running for the old choice is now stale
+                        if (autoServer) {
+                            // The user asked for Auto on purpose, so this really moves to the nearest server.
+                            val list = relayList
+                            if (list != null) autoSelect(list, userAsked = true) else { selectedView.text = "Loading the server list..."; fetchServers() }
+                        } else restoreManualSelection()
                     },
                     "Auto picks the closest server using your location."
                 ),
@@ -345,7 +376,14 @@ class MainActivity : Activity() {
                     ui.secondary("Refresh servers") { fetchServers() },
                     ui.primary("Register key") { registerKey() },
                 ),
-                ui.danger("Remove this phone's key") { removeMyDevice() },
+                ui.danger("Remove this phone's key") {
+                    android.app.AlertDialog.Builder(this)
+                        .setTitle("Remove this phone's key?")
+                        .setMessage("It is removed from your Mullvad account. A router set up with it will lose its tunnel until you register a new key and run the router setup again.")
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Remove") { _, _ -> removeMyDevice() }
+                        .show()
+                },
             ), ui.cardParams()
         )
 
@@ -360,6 +398,7 @@ class MainActivity : Activity() {
                 )
             },
             registerKey = { registerKey() },
+            accountNote = { lastMullvadMessage },
             onProfileChanged = { runOnUiThread { applyProfileLock(); wizard.render() } },
         )
         place(wizard.view, ui.cardParams())
@@ -487,13 +526,14 @@ class MainActivity : Activity() {
     private val applyLink = Runnable { applyLinkNow() }
     private var linkProblem: String? = null
 
-    /** Waits for typing to pause, then makes Android's Wi-Fi suggestion match the fields. */
+    /** Waits for typing to pause, then asks Android to join the link network described by the fields. */
     private fun applyLinkSoon(delayMs: Long = 1_500) {
         uiHandler.removeCallbacks(applyLink)
         uiHandler.postDelayed(applyLink, delayMs)
     }
 
     private fun applyLinkNow() {
+        if (quitting) return
         linkProblem = LinkRuntime.ensure(ssidField.text.toString().trim(), passField.text.toString())
         updateLinkStatus()
     }
@@ -506,13 +546,13 @@ class MainActivity : Activity() {
             appendLine("Network:  ${ssidField.text}")
             appendLine("Phone:    ${addr?.hostAddress?.let { "joined as $it" } ?: "not joined yet"}")
             if (up) append("Router:   ${Link.ROUTER_IP}")
-            else append("The phone joins once the router is set up. If Android asks about a Wi-Fi suggestion, tap Allow.")
+            else append("The phone joins once the router is set up. If Android asks to connect to the link network, tap Connect.")
         }
     }
 
     // ---------------------------------------------------------------- Mullvad servers
 
-    private fun fetchServers() = io.execute {
+    private fun fetchServers(): Unit = io.execute {
         try {
             log("Fetching relay list...")
             val list = MullvadApi.fetchRelays()
@@ -525,23 +565,33 @@ class MainActivity : Activity() {
             }
         } catch (e: Exception) {
             log("Fetch failed: ${describe(e)}")
-            runOnUiThread { selectedView.text = "Could not load the server list." }
+            runOnUiThread {
+                selectedView.text = "Could not load the server list. Trying again shortly; or tap Refresh servers."
+                // No internet yet (or a hiccup): keep trying quietly until it works.
+                uiHandler.postDelayed({ if (relayList == null && !quitting) fetchServers() }, 8_000)
+            }
         }
     }
 
-    /** Picks the closest relay using the device location, or the connection's IP location as a fallback. */
-    private fun autoSelect(list: MullvadApi.RelayList) {
-        // A paired router's tunnel is tied to one server; auto-selection must never move it.
-        profiles.active()?.let { p ->
-            list.relays.firstOrNull { it.hostname == p.serverHost }?.let { pinned ->
-                useRelay(pinned)
-                showRelay(pinned, "Pinned to ${p.title}. Choose Manual to switch the router to another server.")
+    /**
+     * Picks the closest relay using the device location, or the connection's IP location as a fallback.
+     * With a router paired, opening the app keeps the router's current server (so launching never reconfigures the
+     * router); when [userAsked] (the user just chose Auto) it moves the router to the nearest server.
+     */
+    private fun autoSelect(list: MullvadApi.RelayList, userAsked: Boolean = false) {
+        val paired = profiles.active()
+        if (paired != null && !userAsked) {
+            list.relays.firstOrNull { it.hostname == paired.serverHost }?.let { current ->
+                useRelay(current)
+                showRelay(current, "Using ${paired.title}'s current server. Tap Manual, then Auto, to move to the nearest one.")
                 return
             }
         }
+        val token = ++autoToken
         selectedView.text = "Finding the nearest server..."
         locator.locate { fix ->
             io.execute {
+                if (token != autoToken || !autoServer) return@execute // the user changed their mind meanwhile
                 val here = fix ?: runCatching { MullvadApi.ipLocation() }.getOrNull()
                     ?.let { DeviceLocator.Fix(it.first, it.second, "IP address; allow location for a better match") }
                 if (here == null) {
@@ -551,11 +601,45 @@ class MainActivity : Activity() {
                 }
                 val pick = RelayPicker.nearest(list.relays, here.lat, here.lon)
                 if (pick == null) { log("No relays available"); return@execute }
-                useRelay(pick.relay)
                 log("Auto-selected ${pick.relay.hostname} (${pick.relay.city}, ${pick.relay.country}), about ${pick.km.roundToInt()} km away, from ${here.source}")
-                runOnUiThread { showRelay(pick.relay, "Nearest server, ${pick.km.roundToInt()} km away (${here.source})") }
+                val note = "Nearest server, ${pick.km.roundToInt()} km away (${here.source})"
+                runOnUiThread {
+                    if (token != autoToken || !autoServer) return@runOnUiThread
+                    val p = profiles.active()
+                    if (p == null || p.serverHost == pick.relay.hostname) {
+                        useRelay(pick.relay)
+                        showRelay(pick.relay, note)
+                    } else switchRouterTo(pick.relay, note, token)
+                }
             }
         }
+    }
+
+    /**
+     * Moves a paired router to [r]. The phone only starts relaying to the new server once the router has accepted it,
+     * so a router that cannot be reached never ends up talking to a different server than the phone relays to.
+     */
+    private fun switchRouterTo(r: MullvadApi.Relay, note: String, token: Int? = null) {
+        showRelay(r, "Switching the router to ${r.city}...")
+        wizard.applyServer(r) { msg ->
+            log(msg)
+            if (token != null && (token != autoToken || !autoServer)) return@applyServer
+            if (profiles.active()?.serverHost == r.hostname) {
+                useRelay(r)
+                showRelay(r, note)
+            } else {
+                // The router kept its old server; show that, and say why.
+                restoreManualSelectionOrCurrent()
+                selectedView.text = "$msg\n\n${selectedView.text}"
+            }
+        }
+    }
+
+    /** After a failed switch: show whatever server the router really uses. */
+    private fun restoreManualSelectionOrCurrent() {
+        val host = profiles.active()?.serverHost ?: prefs.getString(PREF_RELAY, null)
+        val relay = relayList?.relays?.firstOrNull { it.hostname == host }
+        if (relay != null) { useRelay(relay); showRelay(relay, "Still on this server") }
     }
 
     /** Makes [r] the current server: remembered for the config export and used by the relay. */
@@ -591,11 +675,7 @@ class MainActivity : Activity() {
             .setTitle("Switch the router to ${r.hostname}?")
             .setMessage("The router's tunnel will reconnect to ${r.city}, ${r.country}. Open connections will drop.")
             .setNegativeButton("Cancel") { _, _ -> restoreManualSelection() }
-            .setPositiveButton("Switch") { _, _ ->
-                useRelay(r)
-                showRelay(r, "Switching ${p.title}...")
-                wizard.applyServer(r) { msg -> log(msg); showRelay(r, msg) }
-            }
+            .setPositiveButton("Switch") { _, _ -> switchRouterTo(r, "Router now uses this server") }
             .setOnCancelListener { restoreManualSelection() }
             .show()
     }
@@ -648,7 +728,7 @@ class MainActivity : Activity() {
         val st = RelayRuntime.stats
         val heard = if (st.lastFromRouterAt == 0L) null else (System.currentTimeMillis() - st.lastFromRouterAt) / 1000
         val input = StatusSummary.In(
-                hasKey = prefs.getString("priv", null) != null,
+                hasKey = runCatching { secrets.wgPrivateKey() }.getOrNull() != null,
                 serverName = selectedRelay?.hostname,
                 linkAddress = RelayRuntime.linkAddress()?.hostAddress,
                 routerTitle = profiles.active()?.title,
@@ -682,7 +762,8 @@ class MainActivity : Activity() {
     /** Runs [block] with a fresh access token. The account number never leaves this call. */
     private fun withToken(block: (String) -> Unit) {
         val account = accountField.text.toString().filter { it.isDigit() }
-        if (account.length != 16) { log("Enter your 16-digit account number"); return }
+        if (account.length != 16) { tell("Enter your 16-digit Mullvad account number first.", ok = false); return }
+        tell("Working...")
         io.execute {
             try {
                 val token = MullvadApi.login(account)
@@ -695,24 +776,37 @@ class MainActivity : Activity() {
                 block(token)
             } catch (e: Exception) {
                 log("Failed: ${describe(e)}")
+                tell("That did not work: ${describe(e)}.", ok = false)
             }
         }
     }
 
+    /** Shows the result of an account action right under the buttons (the event log is folded away). */
+    private fun tell(msg: String, ok: Boolean = true) = runOnUiThread {
+        lastMullvadMessage = msg
+        if (::wizard.isInitialized) wizard.render()
+        mullvadMessage.text = msg
+        mullvadMessage.setTextColor(if (ok) Glass.TEXT_2 else android.graphics.Color.parseColor("#E0A0A0"))
+        mullvadMessage.visibility = View.VISIBLE
+    }
+
     private fun registerKey() = withToken { token ->
         val existingId = prefs.getString("device_id", null)
-        if (existingId != null) { log("Already registered as device $existingId; remove it first"); return@withToken }
+        if (existingId != null) { log("Already registered as device $existingId"); tell("This phone is already registered with your account."); return@withToken }
         val priv = X25519.generatePrivateKey()
         val pubB64 = Base64.encodeToString(X25519.publicKey(priv), Base64.NO_WRAP)
-        val device = MullvadApi.addDevice(token, pubB64)
+        // Store the private key (encrypted) BEFORE registering, so a storage problem never leaves a registered key we cannot use.
+        try { secrets.put(SecretStore.WG_PRIVATE_KEY, Base64.encodeToString(priv, Base64.NO_WRAP)) }
+        catch (e: Exception) { tell("Could not store the key securely on this phone, so nothing was registered.", ok = false); return@withToken }
+        val device = try { MullvadApi.addDevice(token, pubB64) } catch (e: Exception) { secrets.clear(SecretStore.WG_PRIVATE_KEY); throw e }
         prefs.edit()
-            .putString("priv", Base64.encodeToString(priv, Base64.NO_WRAP))
             .putString("pub", pubB64)
             .putString("device_id", device.id)
             .putString("ipv4", device.ipv4)
             .putString("ipv6", device.ipv6)
             .apply()
         log("Registered device '${device.name}' (${device.id})\n  tunnel IPs: ${device.ipv4}, ${device.ipv6}")
+        tell("This phone is now registered with Mullvad as ${device.name}.")
     }
 
     private fun listDevices() = withToken { token ->
@@ -720,14 +814,18 @@ class MainActivity : Activity() {
         log("${devices.size}/5 devices on this account:")
         val mine = prefs.getString("device_id", null)
         devices.forEach { log("  ${if (it.id == mine) "*" else " "} ${it.name}  ${it.ipv4}") }
+        tell("${devices.size} of 5 devices on this account" + if (devices.isEmpty()) "." else ":\n" +
+            devices.joinToString("\n") { "${if (it.id == mine) "\u2022 " else "   "}${it.name}${if (it.id == mine) "  (this phone)" else ""}" })
     }
 
     private fun removeMyDevice() = withToken { token ->
         val id = prefs.getString("device_id", null)
-        if (id == null) { log("No device registered by this app"); return@withToken }
+        if (id == null) { log("No device registered by this app"); tell("This phone has no key registered."); return@withToken }
         MullvadApi.removeDevice(token, id)
-        prefs.edit().remove("priv").remove("pub").remove("device_id").remove("ipv4").remove("ipv6").apply()
+        secrets.clear(SecretStore.WG_PRIVATE_KEY)
+        prefs.edit().remove("pub").remove("device_id").remove("ipv4").remove("ipv6").apply()
         log("Removed device $id")
+        tell("This phone's key was removed from your account.")
     }
 
     private fun describe(e: Exception) = when (e) {
@@ -737,6 +835,8 @@ class MainActivity : Activity() {
             "KEY_ALREADY_IN_USE" -> "that key is already registered"
             else -> e.message ?: "API error"
         }
+        is java.net.UnknownHostException, is java.net.SocketTimeoutException, is java.net.ConnectException ->
+            "could not reach Mullvad; check your cellular data and try again"
         else -> "${e.javaClass.simpleName}: ${e.message}"
     }
 

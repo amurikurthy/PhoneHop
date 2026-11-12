@@ -39,6 +39,14 @@ class KeepAliveService : Service() {
             .build()
         startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
 
+        // The user quit the app: if Android restarts this service afterwards (it is sticky), do not come back to life.
+        if (getSharedPreferences("phonehop", Context.MODE_PRIVATE).getBoolean(PREF_USER_QUIT, false)) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        running = true
+
         if (wakeLock == null) {
             wakeLock = getSystemService(PowerManager::class.java)
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PhoneHop:keepalive")
@@ -59,6 +67,7 @@ class KeepAliveService : Service() {
     }
 
     override fun onDestroy() {
+        running = false
         RelayRuntime.stop()
         wakeLock?.takeIf { it.isHeld }?.release()
         wifiLock?.takeIf { it.isHeld }?.release()
@@ -68,6 +77,13 @@ class KeepAliveService : Service() {
     }
 
     companion object {
+        /** Set by Quit so a sticky restart after the process is gone does not revive the service; cleared when the app opens. */
+        const val PREF_USER_QUIT = "user_quit"
+
+        /** True while the service is running; Quit waits for this to clear before ending the process. */
+        @Volatile var running = false
+            private set
+
         private const val CHANNEL = "keepalive"
         private const val NOTIFICATION_ID = 1
 

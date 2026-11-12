@@ -133,6 +133,21 @@ class Ui(private val ctx: Context) {
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(14) })
     }
 
+    /** One line of a checklist: a coloured mark (done / needs attention / not yet) and plain text. */
+    fun checkRow(state: Boolean?, text: String) = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        val (mark, color) = when (state) {
+            true -> "\u2713" to Color.parseColor("#7FC8A0")
+            false -> "\u2717" to Color.parseColor("#D9B26B")
+            null -> "\u2022" to Color.parseColor("#6F7681")
+        }
+        addView(TextView(ctx).apply { this.text = mark; textSize = 16f; setTextColor(color); typeface = bold; gravity = Gravity.CENTER },
+            LinearLayout.LayoutParams(dp(24), ViewGroup.LayoutParams.WRAP_CONTENT))
+        addView(TextView(ctx).apply { this.text = text; textSize = 14.5f; setTextColor(Glass.TEXT) },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(8) })
+    }
+
     /** A small heading that separates groups of cards (for example "Advanced"). */
     fun sectionLabel(t: String) = TextView(ctx).apply {
         text = t.uppercase(); textSize = 11.5f; letterSpacing = 0.12f; setTextColor(Glass.TEXT_2); typeface = medium

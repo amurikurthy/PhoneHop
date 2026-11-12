@@ -16,8 +16,8 @@ import java.util.concurrent.Executors
 /**
  * Guided router setup: Prepare, Your Wi-Fi, Router, Review, Apply. It finds and identifies the
  * router, erases its configuration and rebuilds it for this phone, then watches the phone join the
- * router's link network and the tunnel come up before confirming the change. After that it
- * keeps the router profile and manages the router (status, server switch, revert).
+ * router's link network and the tunnel come up. After that it
+ * keeps the router profile and manages the router (status, server switch).
  */
 class RouterWizard(
     private val activity: Activity,
@@ -29,6 +29,8 @@ class RouterWizard(
     private val log: (String) -> Unit,
     private val inputs: () -> Inputs,
     private val registerKey: () -> Unit,
+    /** The latest result of a Mullvad account action, so it can be shown here as well as in the Mullvad card. */
+    private val accountNote: () -> String = { "" },
     private val onProfileChanged: () -> Unit,
 ) {
     data class Inputs(
@@ -103,19 +105,18 @@ class RouterWizard(
 
     private fun prepareCard(): View {
         val i = inputs()
-        val hasKey = prefs.getString("priv", null) != null && prefs.getString("ipv4", null) != null
-        fun line(ok: Boolean?, text: String) = ui.mono(
-            (when (ok) { true -> "✓ "; false -> "✗ "; null -> "• " }) + text, 12f
-        )
+        val hasKey = secrets.wgPrivateKey() != null && prefs.getString("ipv4", null) != null
+        fun line(ok: Boolean?, text: String) = ui.checkRow(ok, text)
         val ready = hasKey && i.relay != null
         val kids = mutableListOf<View>(
-            line(hasKey, if (hasKey) "Mullvad key registered" else "Mullvad key not registered yet"),
-            line(i.relay != null, i.relay?.let { "VPN server: ${it.hostname} (${it.city})" } ?: "No VPN server chosen yet"),
-            line(if (i.linkUp) true else null, if (i.linkUp) "Phone is on the link network (${phoneLink()})" else "Phone joins the link network after the router is set up"),
+            line(hasKey, if (hasKey) "Mullvad key registered" else "This phone needs a Mullvad key"),
+            line(i.relay != null, i.relay?.let { "VPN server: ${it.hostname} (${it.city})" } ?: "Choosing a VPN server..."),
+            line(if (i.linkUp) true else null, if (i.linkUp) "Phone is connected to the router" else "The phone connects to the router once it is set up"),
         )
         if (!hasKey) {
             kids += ui.caption("Enter your Mullvad account number in the Mullvad card above, then register this phone.")
-            kids += ui.secondary("Register key now") { registerKey(); main.postDelayed({ draw() }, 4_000) }
+            accountNote().takeIf { it.isNotBlank() }?.let { kids += ui.caption(it) }
+            kids += ui.secondary("Register key now") { registerKey() }
         }
         kids += ui.row(
             ui.secondary("Check again") { draw() },
@@ -281,7 +282,6 @@ class RouterWizard(
             ui.caption(
                 "This ERASES the router's whole configuration: Wi-Fi networks and passwords, port forwards, VPN and DHCP settings, " +
                     "and the settings of installed packages. Its LAN address is replaced by the range you chose, so the router may move to a new address, and every device now connected to it will drop and have to join the new Wi-Fi names. " +
-                    "The router keeps a backup of its old settings and puts them back by itself if the tunnel does not come up. " +
                     "Installed packages and the admin password are kept. If a safety check fails, nothing is changed."
             ),
             ui.labeled("Type WIPE to continue", confirmText),
@@ -295,7 +295,7 @@ class RouterWizard(
     private fun buildPlan(): Pair<RouterPlan?, String?> {
         val i = inputs()
         val relay = i.relay ?: return Pair(null, "Choose a VPN server first.")
-        val priv = prefs.getString("priv", null)
+        val priv = runCatching { secrets.wgPrivateKey() }.getOrNull()
         val v4 = prefs.getString("ipv4", null)
         if (priv == null || v4 == null) return Pair(null, "Register a Mullvad key first.")
         val lan = LanPlan.parse(lanText) ?: return Pair(null, "Enter the router's address like 192.168.50.1/24.")
@@ -335,10 +335,7 @@ class RouterWizard(
             kids += ui.caption("All done. Join $w5 or $w24 on your devices.")
             kids += ui.primary("Finish") { applying = false; updating = false; step = Step.PREPARE; draw() }
         } else if (!applying) {
-            kids += ui.row(
-                ui.secondary("Back") { applying = false; go(Step.REVIEW) },
-                ui.danger("Revert router") { revertRouter() },
-            )
+            kids += ui.secondary("Back") { applying = false; go(Step.REVIEW) }
         }
         return ui.card("Router setup", subtitle(), *kids.toTypedArray())
     }
@@ -358,7 +355,7 @@ class RouterWizard(
         log("Router setup started on $host")
         worker.execute {
             try {
-                say("Backing up the current configuration, erasing it and rebuilding for this phone...")
+                say("Erasing the router's settings and rebuilding them for this phone...")
                 val res = ssh(host).run(host, pw, RouterScripts.setup(plan), timeoutMs = 90_000)
                 val m = RouterScripts.parseMarkers(res.output)
                 val errors = res.output.lines().filter { it.startsWith("PHONEHOP_ERROR:") }.map { it.removePrefix("PHONEHOP_ERROR:").trim() }
@@ -366,11 +363,11 @@ class RouterWizard(
                     val wiped = res.output.contains("PHONEHOP_WIPING")
                     fail(
                         (errors.firstOrNull() ?: "The router reported a problem (exit ${res.exitCode}).") +
-                            if (wiped) " The router may be half-reset: use Revert router." else " Nothing was changed."
+                            if (wiped) " The router may be half-reset: run the setup again." else " Nothing was changed."
                     )
                     return@execute
                 }
-                done("Backed up, erased and rebuilt the router")
+                done("Erased and rebuilt the router")
                 done("Your Wi-Fi: ${RouterScripts.wifiNames(wifiName).first} and ${RouterScripts.wifiNames(wifiName).second}")
                 watchTunnel(plan, id, relay, plan.adminPassword)
             } catch (e: Exception) {
@@ -379,24 +376,23 @@ class RouterWizard(
         }
     }
 
-    /** Waits for the phone to join the router's link network and the tunnel to answer, then confirms the change. */
+    /** Waits for the phone to join the router's link network and the tunnel to answer, then finishes the setup. */
     private fun watchTunnel(plan: RouterPlan, id: RouterIdentity?, relay: MullvadApi.Relay, pw: String) {
         val deadline = System.currentTimeMillis() + 9 * 60_000L
         say("The router is restarting its network. The phone will join ${plan.phoneSsid} automatically...")
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(6_000)
             val addr = (if (RelayRuntime.linkAddress() != null) Link.ROUTER_IP else null)
-            if (addr == null) { say("Waiting for the phone to join ${plan.phoneSsid} (it can take a minute). If Android asks about a Wi-Fi suggestion, tap Allow."); continue }
+            if (addr == null) { say("Waiting for the phone to join ${plan.phoneSsid} (it can take a minute). If Android asks to connect to it, tap Connect."); continue }
             try {
                 val res = ssh(addr).run(addr, pw, RouterScripts.status(), timeoutMs = 20_000)
                 val age = RouterScripts.handshakeAgeSeconds(RouterScripts.parseMarkers(res.output))
                 if (age != null && age < 180) {
-                    ssh(addr).run(addr, pw, RouterScripts.confirm(), timeoutMs = 20_000)
                     done("Phone joined the router's link network (router at $addr)")
                     done("Tunnel to Mullvad is up (handshake ${age}s ago)")
                     savePairing(id, relay, pw)
                     main.post { finished = true; draw() }
-                    log("Router setup confirmed")
+                    log("Router setup finished")
                     return
                 }
                 say("Phone is on the link network; waiting for the tunnel to Mullvad...")
@@ -404,7 +400,7 @@ class RouterWizard(
                 say("Phone is on the link network, but the router's admin login is not reachable yet (${friendly(e)})")
             }
         }
-        fail("The tunnel did not come up in time. The router will put its old settings back by itself within a few minutes.")
+        fail("The tunnel did not come up in time. Check that the router is on and close to the phone, then run the setup again.")
     }
 
     private fun fail(message: String) = main.post {
@@ -448,7 +444,6 @@ class RouterWizard(
                 ui.danger("Forget router") { forget(p) },
             ),
             ui.secondary("Change Wi-Fi or re-run setup") { updating = true; identity = null; step = Step.WIFI; draw() },
-            ui.danger("Revert router to original") { revertRouter() },
         )
     }
 
@@ -467,8 +462,7 @@ class RouterWizard(
                 val res = ssh(host).run(host, pw, RouterScripts.status(), timeoutMs = 20_000)
                 val m = RouterScripts.parseMarkers(res.output)
                 val age = RouterScripts.handshakeAgeSeconds(m)
-                "Router reachable at $host.\n" + (age?.let { "Tunnel handshake $it s ago." } ?: "No tunnel handshake yet.") +
-                    (if (m["PENDING"] == "1") "\nAutomatic rollback is still armed." else "")
+                "Router reachable at $host.\n" + (age?.let { "Tunnel handshake $it s ago." } ?: "No tunnel handshake yet.")
             } catch (e: Exception) { "Could not check: ${friendly(e)}" }
             main.post { pairedStatus = text; draw() }
         }
@@ -491,30 +485,6 @@ class RouterWizard(
             } catch (e: Exception) { "Could not update the router: ${friendly(e)}" }
             main.post { done(msg); onProfileChanged() }
         }
-    }
-
-    private fun revertRouter() {
-        val p = profiles.active()
-        val host = managementHost() ?: routerHost.takeIf { it.isNotBlank() }
-        val pw = p?.let { storedPassword(it) } ?: adminPassword.takeIf { it.isNotBlank() }
-        if (host == null || pw == null) {
-            problem = "To revert, the app needs the router's address and admin password (use the Router step)."; draw(); return
-        }
-        AlertDialog.Builder(activity).setTitle("Revert the router?")
-            .setMessage("The router's configuration goes back to exactly what it was before PhoneHop erased it. The phone will no longer join the link network.")
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Revert") { _, _ ->
-                worker.execute {
-                    val msg = try {
-                        val res = ssh(host).run(host, pw, RouterScripts.revert(), timeoutMs = 30_000)
-                        if (res.output.contains("PHONEHOP_REVERTED")) {
-                            p?.let { profiles.delete(it.id); runCatching { secrets.clear("router_admin_${it.id}") } }
-                            "Router restored to its original configuration."
-                        } else "Revert failed: ${res.output.lines().lastOrNull { it.isNotBlank() }}"
-                    } catch (e: Exception) { "Revert failed: ${friendly(e)}" }
-                    main.post { pairedStatus = msg; problem = ""; applying = false; finished = false; updating = false; step = Step.PREPARE; log(msg); draw(); onProfileChanged() }
-                }
-            }.show()
     }
 
     private fun forget(p: RouterProfile) {

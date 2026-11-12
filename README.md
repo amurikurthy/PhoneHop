@@ -54,7 +54,7 @@ The images below are rendered from the app's own screens with sample values fill
 
 - Enter your 16-digit Mullvad account number (the eye icon shows or hides it). Once it works it is remembered on the phone, encrypted with the Android Keystore, until you remove it. It is never logged.
 - **Register key** generates a WireGuard key pair on the phone (X25519), registers the public key as a device on your Mullvad account, and keeps the private key encrypted. **Remove this phone's key** unregisters it. **List devices** and **Check account** show what Mullvad has.
-- **Server selection** is **Auto (nearest)** by default: the app uses your approximate location (coarse location permission, or your connection's approximate location from Mullvad if you decline) and picks a nearby server, weighting by server capacity. **Manual** lets you pick a country and server yourself.
+- **Server selection** is **Auto (nearest)** by default: the app uses your approximate location (coarse location permission, or your connection's approximate location from Mullvad if you decline) and picks a nearby server, weighting by server capacity. **Manual** lets you pick a country and server yourself. With a router already set up, opening the app keeps the router's current server; choosing **Auto** again moves the router to the nearest one, and the phone only starts relaying to the new server once the router has accepted the change.
 
 ### Router setup wizard
 
@@ -69,13 +69,13 @@ A five-step guided flow that **erases the router's configuration and rebuilds it
 What the setup does on the router:
 
 - Runs safety checks first. If any fails, nothing is changed.
-- Saves a backup of the old configuration and starts a rollback timer. If the tunnel never comes up and nothing confirms, the old settings are put back by themselves. **Revert** in the app does the same on demand.
+- **This is a one-way wipe.** The router's old settings are not saved, and the app has no way to restore them.
 - Resets to the firmware defaults, then configures: separate 5 GHz (`_5G`) and 2.4 GHz (`_2.4G`) networks, the hidden link network for the phone, your LAN range, the WireGuard peer (MTU 1380), and the firewall.
 - Avoids DFS channels on 5 GHz (channel 36) so the radio always starts.
 - Firewall: clients can only reach the internet through the tunnel; the phone link is closed except DHCP and SSH from the phone; DNS goes through the tunnel.
 - Adds anti-bufferbloat queue management and flow offloading (see below).
 
-Once paired, the wizard shows the router's status and offers **Refresh status**, **Forget router**, **Change Wi-Fi or re-run setup** and **Revert**. The router's admin password is remembered encrypted on the phone so the app can manage it later.
+Once paired, the wizard shows the router's status and offers **Refresh status**, **Forget router** and **Change Wi-Fi or re-run setup**. The router's admin password is remembered encrypted on the phone so the app can manage it later.
 
 ### Status, and the Advanced cards
 
@@ -113,7 +113,7 @@ What the app cannot control: the cellular network itself. Brief 150 to 500 ms st
 - The Mullvad account number, router admin password and WireGuard private key are stored encrypted with the Android Keystore. Nothing secret is written to the log.
 - SSH to the router trusts the host key on first use and checks it afterward.
 - The app contacts Mullvad's API and `am.i.mullvad.net` (approximate location), and GitHub (updates). Those requests use the phone's cellular connection, not the tunnel.
-- Backups and rollback live on the router; the phone does not keep a copy of the router's old configuration.
+- Setup erases the router's configuration for good. Nothing is backed up on the router or the phone.
 
 ## Install
 
@@ -146,7 +146,7 @@ The **Release** GitHub Actions workflow builds a signed APK and its `.sha256` an
 | `RelayRuntime.kt`, `LinkRuntime.kt`, `KeepAliveService.kt` | Runs the relay, joins the link network, foreground service, keep-warm |
 | `MainActivity.kt`, `Ui.kt` | The screens |
 | `RouterWizard.kt`, `RouterScripts.kt`, `RouterSsh.kt`, `RouterDiscovery.kt`, `RouterProfile.kt` | Router setup over SSH |
-| `app/src/main/resources/router/*.sh` | The scripts that run on the router (setup, revert, status, confirm, identity, server) |
+| `app/src/main/resources/router/*.sh` | The scripts that run on the router (setup, status, identity, server) |
 | `MullvadApi.kt`, `RelayPicker.kt`, `DeviceLocator.kt`, `X25519.kt` | Mullvad API, nearest-server choice, key generation |
 | `SecretStore.kt`, `KeyValueStore.kt` | Encrypted storage |
 | `Updater.kt` | Self-update from GitHub releases |
@@ -155,6 +155,6 @@ The **Release** GitHub Actions workflow builds a signed APK and its `.sha256` an
 ## Limitations
 
 - One router and one phone at a time.
-- The router is wiped and rebuilt by setup; it is not meant to keep other roles.
+- The router is wiped and rebuilt by setup and cannot be restored by the app; it is not meant to keep other roles.
 - The link is tied to the app: when the app is quit or killed, the router has no tunnel until it is reopened.
 - Latency spikes from the cellular network itself cannot be removed by the app.

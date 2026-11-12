@@ -34,7 +34,6 @@ data class RouterPlan(
     /** Two-letter Wi-Fi regulatory country, e.g. US. Without it radios may be limited to a few channels. */
     val country: String = "",
     val nowMillis: Long = System.currentTimeMillis(),
-    val rollbackSeconds: Int = 600,
 )
 
 /** Builds the shell scripts the app runs on the router over SSH, from the templates in resources/router. */
@@ -71,7 +70,6 @@ object RouterScripts {
         LanPlan.validate(LanPlan.Lan(p.lanAddress, p.lanPrefix), LanPlan.Lan(p.relayHost, 24))?.let { return it }
         if (p.relayHost != Link.PHONE_IP) return "The phone's link address must be ${Link.PHONE_IP}"
         if (p.adminPassword.length !in 8..63 || bad(p.adminPassword)) return "The router admin password must be 8 to 63 characters"
-        if (p.rollbackSeconds !in 60..86_400) return "Rollback time is not valid"
         return null
     }
 
@@ -100,17 +98,13 @@ object RouterScripts {
             "DHCP_START" to LanPlan.DHCP_START.toString(),
             "DHCP_LIMIT" to LanPlan.DHCP_LIMIT.toString(),
             "NOW" to shq(clock),
-            "ROLLBACK_SECONDS" to p.rollbackSeconds.toString(),
         )
         var script = load("setup.sh")
         for ((k, v) in values) script = script.replace("@@$k@@", v)
-        // The revert script goes in last, verbatim, so values above can never alter it.
-        script = script.replace("@@REVERT_BODY@@", load("revert.sh").trimEnd())
         check(!Regex("@@[A-Z_0-9]+@@").containsMatchIn(script)) { "unfilled placeholder in setup script" }
         return script
     }
 
-    fun revert(): String = load("revert.sh")
     fun identity(): String = load("identity.sh")
 
     /** Script that points the existing tunnel at another server. */
@@ -119,7 +113,6 @@ object RouterScripts {
         return load("server.sh").replace("@@SERVER_PUBLIC_KEY@@", shq(serverPublicKey))
     }
     fun status(): String = load("status.sh")
-    fun confirm(): String = load("confirm.sh")
 
     /** Lines of the form PHONEHOP_NAME=value in a script's output. */
     fun parseMarkers(output: String): Map<String, String> =

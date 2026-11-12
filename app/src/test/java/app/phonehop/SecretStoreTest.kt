@@ -88,4 +88,16 @@ class SecretStoreTest {
         assertEquals("other-password", store.get("router_admin_SN2"))
         assertNull(store.get("never-set"))
     }
+
+    @Test fun theWireGuardPrivateKeyIsStoredEncrypted() {
+        val kv = MemoryKeyValueStore()
+        val store = SecretStore(kv, SoftwareCipher(newKey()))
+        assertNull(store.wgPrivateKey())
+        val key = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk="
+        store.put(SecretStore.WG_PRIVATE_KEY, key)
+        assertEquals(key, store.wgPrivateKey())
+        assertFalse(kv.map.values.any { it.contains(key) })
+        store.clear(SecretStore.WG_PRIVATE_KEY)
+        assertNull(store.wgPrivateKey())
+    }
 }

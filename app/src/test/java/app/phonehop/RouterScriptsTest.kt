@@ -41,7 +41,7 @@ class RouterScriptsTest {
         assertTrue(s.contains("SSID='DIRECT-ph-hop'"))
         assertTrue(s.contains("PREFER_5G=1"))
         assertTrue(s.contains("NOW='2027-01-15 08:00:00'"))
-        assertTrue(s.contains("PHONEHOP_REVERTED")) // the revert script is embedded
+        assertFalse(s.contains("revert") || s.contains("backup") || s.contains("ROLLBACK"))
     }
 
     @Test fun hostileValuesCannotBreakOutOfQuotes() {
@@ -71,8 +71,7 @@ class RouterScriptsTest {
     }
 
     @Test fun parsesMarkersAndHandshakeAge() {
-        val m = RouterScripts.parseMarkers("noise\nPHONEHOP_PENDING=1\nPHONEHOP_NOW=1000\nPHONEHOP_HANDSHAKE=940\nPHONEHOP_DEFAULT_ROUTE=default dev mullvad\n")
-        assertEquals("1", m["PENDING"])
+        val m = RouterScripts.parseMarkers("noise\nPHONEHOP_NOW=1000\nPHONEHOP_HANDSHAKE=940\nPHONEHOP_DEFAULT_ROUTE=default dev mullvad\n")
         assertEquals("default dev mullvad", m["DEFAULT_ROUTE"])
         assertEquals(60L, RouterScripts.handshakeAgeSeconds(m))
         assertNull(RouterScripts.handshakeAgeSeconds(mapOf("NOW" to "1000", "HANDSHAKE" to "0")))
@@ -182,8 +181,7 @@ class RouterScriptsTest {
         val rom = File(dir, "rom")
         val env = mutableMapOf(
             "FAKE_UCI_STATE" to state.path, "PH_CFG" to cfg.path, "PH_INITD" to File(dir, "initd").path,
-            "PH_BK" to File(dir, "backup").path, "PH_REVERT" to File(dir, "revert.sh").path,
-            "PH_PENDING" to File(dir, "pending").path, "PH_ETC" to File(dir, "etc").path, "PH_ROM" to rom.path,
+            "PH_ETC" to File(dir, "etc").path, "PH_ROM" to rom.path,
             "PH_CONFIG_GENERATE" to File(dir, "bin/config_generate").path,
             "PATH" to File(dir, "bin").path + ":" + System.getenv("PATH"),
         )
@@ -210,8 +208,8 @@ class RouterScriptsTest {
         shim("wifi", "echo \"wifi \$*\" >> '${dir}/calls.log'\n[ \"\$1\" = config ] && echo 'GENERATED wireless' > \"\$PH_CFG/wireless\"\nexit 0")
         // config_generate rebuilds network/system and the uci database as the firmware would.
         shim("config_generate", "echo 'GENERATED network' > \"\$PH_CFG/network\"\necho 'GENERATED system' > \"\$PH_CFG/system\"\ncp '${r.pristineFile}' \"\$FAKE_UCI_STATE\"")
-        // Short sleeps return at once; the long rollback timer is parked so it cannot fire during the test.
-        shim("sleep", "[ \"\$1\" -ge 100 ] && exec /bin/sleep 20\nexit 0")
+        // The script only sleeps briefly (before applying in the background); return at once.
+        shim("sleep", "exit 0")
         for (name in listOf("dropbear", "network", "firewall", "dnsmasq")) {
             File(dir, "initd/$name").apply { writeText("#!/bin/sh\necho \"$name \$*\" >> '${dir}/calls.log'\n"); setExecutable(true) }
         }
@@ -316,15 +314,14 @@ class RouterScriptsTest {
         // --- the admin password the user chose is set on the router
         assertEquals("admin-pass-1\nadmin-pass-1\n", File(r.dir, "passwd.log").readText())
         assertTrue(out, out.contains("PHONEHOP_ADMIN_PASSWORD_SET=1"))
-        // --- safety net
-        assertTrue(File(r.dir, "pending").exists())
-        assertTrue(File(r.dir, "revert.sh").readText().contains("PHONEHOP_REVERTED"))
-        val listing = ProcessBuilder("tar", "tzf", File(r.dir, "backup/config.tgz").path).start().inputStream.bufferedReader().readText()
-        assertTrue(listing, listing.contains("custom_pkg") && listing.contains("glconfig"))
+        // --- no backup or rollback machinery is left on the router
+        assertFalse(File(r.dir, "backup").exists())
+        assertFalse(File(r.dir, "pending").exists())
+        assertFalse(File(r.dir, "revert.sh").exists())
     }
 
     @Test fun anyFailedSafetyCheckLeavesTheRouterUntouched() {
-        // No factory defaults: the script must refuse BEFORE erasing or even backing up anything.
+        // No factory defaults: the script must refuse BEFORE erasing anything.
         val r = newRouter() ?: return
         r.env["PH_ROM"] = File(r.dir, "does-not-exist").path
         val (code, out) = run(r, RouterScripts.setup(plan()))
@@ -333,7 +330,6 @@ class RouterScriptsTest {
         assertFalse(out.contains("PHONEHOP_WIPING"))
         assertEquals("USER custom\n", File(r.cfg, "custom_pkg").readText())
         assertEquals("ORIGINAL network\n", File(r.cfg, "network").readText())
-        assertFalse(File(r.dir, "backup").exists())
         assertTrue(r.has("wireless.old_repeater"))
     }
 
@@ -361,13 +357,10 @@ class RouterScriptsTest {
     @Test fun setupIsIdempotent() {
         val r = newRouter() ?: return
         assertEquals(0, run(r, RouterScripts.setup(plan())).first)
-        val firstBackup = File(r.dir, "backup/config.tgz").readBytes()
         assertEquals(0, run(r, RouterScripts.setup(plan())).first)
         assertEquals(listOf("0.0.0.0/0", "::/0"), r.get("network.mullvad_peer.allowed_ips"))
         assertEquals(listOf("wan"), r.get("firewall.@zone[1].network"))
         assertEquals(listOf("10.64.0.1"), r.get("dhcp.@dnsmasq[0].server"))
-        // The backup is of the TRUE original and is never overwritten by a later run.
-        assertTrue(firstBackup.contentEquals(File(r.dir, "backup/config.tgz").readBytes()))
     }
 
     @Test fun setupFailsCleanlyWithoutUci() {
@@ -378,36 +371,10 @@ class RouterScriptsTest {
         assertTrue(out, out.contains("PHONEHOP_ERROR"))
     }
 
-    @Test fun revertRestoresTheEntireOriginalConfiguration() {
-        val r = newRouter() ?: return
-        assertEquals(0, run(r, RouterScripts.setup(plan())).first)
-        assertFalse(File(r.cfg, "custom_pkg").exists())
-        val (code, out) = run(r, RouterScripts.revert())
-        assertEquals(out, 0, code)
-        assertTrue(out.contains("PHONEHOP_REVERTED"))
-        assertEquals(listOf("custom_pkg", "dhcp", "dropbear", "firewall", "glconfig", "network", "wireless"), r.cfgFiles())
-        assertEquals("USER custom\n", File(r.cfg, "custom_pkg").readText())
-        assertEquals("USER glconfig\n", File(r.cfg, "glconfig").readText())
-        assertEquals("ORIGINAL network\n", File(r.cfg, "network").readText())
-        assertEquals("ORIGINAL wireless\n", File(r.cfg, "wireless").readText())
-        assertFalse(File(r.dir, "pending").exists())
-    }
-
-    @Test fun confirmCancelsTheRollback() {
-        val r = newRouter() ?: return
-        assertEquals(0, run(r, RouterScripts.setup(plan())).first)
-        assertTrue(File(r.dir, "pending").exists())
-        val (code, out) = run(r, RouterScripts.confirm())
-        assertEquals(0, code)
-        assertTrue(out.contains("PHONEHOP_CONFIRMED"))
-        assertFalse(File(r.dir, "pending").exists())
-    }
-
-    @Test fun statusReportsPendingState() {
+    @Test fun statusReportsTheClock() {
         val r = newRouter() ?: return
         assertEquals(0, run(r, RouterScripts.setup(plan())).first)
         val markers = RouterScripts.parseMarkers(run(r, RouterScripts.status()).second)
-        assertEquals("1", markers["PENDING"])
         assertNotNull(markers["NOW"])
     }
 
