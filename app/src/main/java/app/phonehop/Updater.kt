@@ -102,7 +102,8 @@ class Updater(private val context: Context) {
         val session = installer.openSession(sessionId)
         try {
             val digest = MessageDigest.getInstance("SHA-256")
-            val conn = URL(release.apkUrl).openConnection() as HttpURLConnection
+            val apkUrl = URL(release.apkUrl)
+            val conn = (RelayRuntime.upstreamNetwork()?.openConnection(apkUrl) ?: apkUrl.openConnection()) as HttpURLConnection
             conn.connectTimeout = 15_000
             conn.readTimeout = 30_000
             conn.setRequestProperty("User-Agent", USER_AGENT)
@@ -147,7 +148,8 @@ class Updater(private val context: Context) {
     }
 
     private fun httpGet(url: String): String {
-        val conn = URL(url).openConnection() as HttpURLConnection
+        val target = URL(url)
+        val conn = (RelayRuntime.upstreamNetwork()?.openConnection(target) ?: target.openConnection()) as HttpURLConnection
         try {
             conn.connectTimeout = 10_000
             conn.readTimeout = 15_000

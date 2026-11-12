@@ -60,6 +60,8 @@ class LatencyProbe(
     private val intervalMs: Long = 2_000,
     private val timeoutMs: Int = 1_500,
     private val linkPort: Int = 22,
+    /** Opens the socket used to time the router (on Android: bound to the link network). */
+    private val linkSocket: () -> Socket = { Socket() },
 ) {
     @Volatile private var running = false
     private var thread: Thread? = null
@@ -70,7 +72,7 @@ class LatencyProbe(
         thread = Thread({
             while (running) {
                 val started = System.currentTimeMillis()
-                val link = routerHost()?.let { measureConnectMs(InetSocketAddress(it, linkPort), timeoutMs) { Socket() } }
+                val link = routerHost()?.let { measureConnectMs(InetSocketAddress(it, linkPort), timeoutMs) { linkSocket() } }
                 val net = internetNetwork()
                 val target = internetTarget()
                 val internet = if (net != null && target != null) {

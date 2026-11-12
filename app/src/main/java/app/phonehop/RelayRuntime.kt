@@ -36,6 +36,8 @@ object RelayRuntime {
     @Volatile private var relay: Relay? = null
     @Volatile private var network: Network? = null
     private var wifiCallback: ConnectivityManager.NetworkCallback? = null
+    private var cellularCallback: ConnectivityManager.NetworkCallback? = null
+    @Volatile private var cellular: Network? = null
     @Volatile private var pendingUpstream: String? = null
     private var probe: LatencyProbe? = null
     private var powerReceiver: BroadcastReceiver? = null
@@ -58,6 +60,7 @@ object RelayRuntime {
             stats = stats,
             log = { event(it) },
             threadSetup = { runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY) } },
+            prepareListenSocket = { s -> runCatching { linkNetwork()?.bindSocket(s) } },
         )
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(n: Network) {
@@ -70,11 +73,34 @@ object RelayRuntime {
                 if (network == n) { network = null; internetText = "no internet network"; event("Internet network lost") }
             }
             override fun onCapabilitiesChanged(n: Network, c: NetworkCapabilities) {
-                if (n == network) internetText = describe(c)
+                if (n == network && cellular == null) internetText = describe(c)
             }
         }
         callback = cb
         cm.registerDefaultNetworkCallback(cb)
+        // The relay's egress must be cellular. Android can make the link Wi-Fi (which has no internet) the default
+        // network, and traffic sent there goes nowhere, so ask for the cellular network explicitly.
+        val cellCb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(n: Network) {
+                cellular = n
+                event("Cellular available; relay traffic uses it")
+                r.rebindUpstream()
+                resolveInternetTarget(n)
+            }
+            override fun onLost(n: Network) {
+                if (cellular == n) { cellular = null; event("Cellular lost"); r.rebindUpstream() }
+            }
+            override fun onCapabilitiesChanged(n: Network, c: NetworkCapabilities) {
+                if (n == cellular) internetText = describe(c)
+            }
+        }
+        cellularCallback = cellCb
+        cm.requestNetwork(
+            android.net.NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build(),
+            cellCb
+        )
         val wifiCb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(n: Network) { event("Wi-Fi network available"); r.rebindListen() }
             override fun onLinkPropertiesChanged(n: Network, lp: android.net.LinkProperties) { r.rebindListen() }
@@ -95,10 +121,11 @@ object RelayRuntime {
         val pm = app.getSystemService(PowerManager::class.java)
         probe = LatencyProbe(
             routerHost = { if (linkAddress() != null) Link.ROUTER_IP else null },
-            internetNetwork = { network },
+            internetNetwork = { upstreamNetwork() },
             internetTarget = { internetTarget },
             screenOn = { pm.isInteractive },
             log = latency,
+            linkSocket = { linkNetwork()?.socketFactory?.createSocket() ?: java.net.Socket() },
         ).also { it.start() }
         event("Relay started")
     }
@@ -106,6 +133,9 @@ object RelayRuntime {
     @Synchronized
     fun stop() {
         callback?.let { runCatching { connectivity?.unregisterNetworkCallback(it) } }
+        cellularCallback?.let { runCatching { connectivity?.unregisterNetworkCallback(it) } }
+        cellularCallback = null
+        cellular = null
         wifiCallback?.let { runCatching { connectivity?.unregisterNetworkCallback(it) } }
         wifiCallback = null
         callback = null
@@ -185,8 +215,30 @@ object RelayRuntime {
     }.getOrNull()
 
     private fun openUpstreamSocket(): DatagramSocket {
-        val n = network ?: throw IOException("no internet network")
+        val n = upstreamNetwork() ?: throw IOException("no internet network")
         return DatagramSocket().also { n.bindSocket(it) }
+    }
+
+    /** The Wi-Fi network that carries the router link, so sockets to the router are routed over it. */
+    fun linkNetwork(): Network? {
+        LinkRuntime.network?.let { return it }
+        val cm = connectivity ?: return null
+        val base = runCatching { InetAddress.getByName(Link.SUBNET) }.getOrNull() ?: return null
+        return cm.allNetworks.firstOrNull { n ->
+            cm.getLinkProperties(n)?.linkAddresses?.any { it.address is Inet4Address && Subnet.contains(base, Link.PREFIX, it.address) } == true
+        }
+    }
+
+    /** The network for everything that must reach the internet: cellular, else the default unless it is the link. */
+    fun upstreamNetwork(): Network? = cellular ?: network?.takeIf { !isLinkNetwork(it) }
+
+    /** Called when the link network has been joined: the listener must bind to it. */
+    fun linkJoined() { relay?.rebindListen() }
+
+    private fun isLinkNetwork(n: Network): Boolean {
+        val base = runCatching { InetAddress.getByName(Link.SUBNET) }.getOrNull() ?: return false
+        return connectivity?.getLinkProperties(n)?.linkAddresses
+            ?.any { it.address is Inet4Address && Subnet.contains(base, Link.PREFIX, it.address) } == true
     }
 
     private fun groupAddress(): Pair<InetAddress, Int>? = linkAddress()?.let { it to Link.PREFIX }

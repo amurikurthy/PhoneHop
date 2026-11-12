@@ -491,9 +491,9 @@ class TrafficPanel(
                 append(t)
                 setSpan(android.text.style.ForegroundColorSpan(color), start, length, 0)
             }
-            part("↓ ${TrafficMath.formatRate(downBps)}", downColor)
+            part("$downLabel ${format(downBps)}", downColor)
             append("   ")
-            part("↑ ${TrafficMath.formatRate(upBps)}", upColor)
+            part("$upLabel ${format(upBps)}", upColor)
         }
     }
 }

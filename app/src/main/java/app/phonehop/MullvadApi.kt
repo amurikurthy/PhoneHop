@@ -105,7 +105,8 @@ object MullvadApi {
     )
 
     private fun request(method: String, path: String, body: String? = null, bearer: String? = null): String {
-        val conn = URL(if (path.startsWith("http")) path else BASE + path).openConnection() as HttpURLConnection
+        val url = URL(if (path.startsWith("http")) path else BASE + path)
+        val conn = (RelayRuntime.upstreamNetwork()?.openConnection(url) ?: url.openConnection()) as HttpURLConnection
         try {
             conn.requestMethod = method
             conn.connectTimeout = 10_000

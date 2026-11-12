@@ -67,6 +67,8 @@ class Relay(
     private val watchdogTickMs: Long = 2_000,
     /** Runs at the start of each relay thread (on Android: raises its scheduling priority). */
     private val threadSetup: () -> Unit = {},
+    /** Called on the new listening socket before it is bound (on Android: ties it to the link network). */
+    private val prepareListenSocket: (DatagramSocket) -> Unit = {},
 ) {
     private val running = AtomicBoolean(false)
     @Volatile private var upstream: InetSocketAddress? = null
@@ -122,6 +124,7 @@ class Relay(
             val sock = try {
                 DatagramSocket(null).apply {
                     reuseAddress = true
+                    prepareListenSocket(this)
                     bind(InetSocketAddress(addr, listenPort))
                     soTimeout = 1000
                 }
