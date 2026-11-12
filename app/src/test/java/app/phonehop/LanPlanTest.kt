@@ -35,8 +35,8 @@ class LanPlanTest {
     }
 
     @Test fun rejectsTheWifiDirectLinkRange() {
-        assertNotNull(check("192.168.49.1/24"))
-        assertNotNull(check("192.168.49.77/24"))
+        assertNotNull(check("192.168.51.1/24"))
+        assertNotNull(check("192.168.51.77/24"))
         assertNotNull(check("192.168.0.1/16")) // contains 192.168.49.0/24
     }
 

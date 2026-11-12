@@ -26,12 +26,12 @@ data class RouterProfile(
     val model: String,
     val mac: String,
     val serial: String,
-    val groupSuffix: String,
-    val groupPassphrase: String,
+    val linkSsid: String,
+    val linkPassphrase: String,
     val bandIndex: Int,
     val clientSsid: String,
     val createdAt: Long,
-    /** The phone's group settings were changed after setup, so the router needs updating. */
+    /** The link network settings were changed after setup, so the router needs updating. */
     val stale: Boolean = false,
     /** The VPN server the router's tunnel is pointed at. Auto-selection never changes it. */
     val serverHost: String = "",
@@ -63,8 +63,8 @@ class ProfileStore(private val kv: KeyValueStore) {
 
     private fun encode(p: RouterProfile): String = listOf(
         "id" to p.id, "model" to p.model, "mac" to p.mac, "serial" to p.serial,
-        "suffix" to p.groupSuffix, "pass" to p.groupPassphrase, "band" to p.bandIndex.toString(),
-        "client" to p.clientSsid, "created" to p.createdAt.toString(), "stale" to p.stale.toString(),
+        "suffix" to p.linkSsid, "pass" to p.linkPassphrase, "band" to p.bandIndex.toString(),
+        "client" to p.clientSsid, "created" to p.createdAt.toString(), "stale" to p.stale.toString(), "lm" to "client",
         "shost" to p.serverHost, "sip" to p.serverIp, "skey" to p.serverKey, "lan" to p.lanCidr,
     ).joinToString("&") { (k, v) -> "$k=" + URLEncoder.encode(v, "UTF-8") }
 
@@ -74,10 +74,11 @@ class ProfileStore(private val kv: KeyValueStore) {
             val i = it.indexOf('=')
             if (i < 0) null else it.substring(0, i) to URLDecoder.decode(it.substring(i + 1), "UTF-8")
         }.toMap()
+        if (m["lm"] != "client") return null // set up the old Wi-Fi Direct way: it has to be set up again
         return try {
             RouterProfile(
                 id = m.getValue("id"), model = m["model"].orEmpty(), mac = m["mac"].orEmpty(), serial = m["serial"].orEmpty(),
-                groupSuffix = m.getValue("suffix"), groupPassphrase = m.getValue("pass"),
+                linkSsid = m.getValue("suffix"), linkPassphrase = m.getValue("pass"),
                 bandIndex = m["band"]?.toIntOrNull() ?: 2, clientSsid = m["client"].orEmpty(),
                 createdAt = m["created"]?.toLongOrNull() ?: 0L, stale = m["stale"] == "true",
                 serverHost = m["shost"].orEmpty(), serverIp = m["sip"].orEmpty(), serverKey = m["skey"].orEmpty(), lanCidr = m["lan"].orEmpty(),

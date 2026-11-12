@@ -24,7 +24,6 @@ import java.net.NetworkInterface
  */
 object RelayRuntime {
     const val PORT = 51820
-    private const val FALLBACK_GO = "192.168.49.1"
 
     data class Event(val at: Long, val msg: String)
 
@@ -36,7 +35,7 @@ object RelayRuntime {
 
     @Volatile private var relay: Relay? = null
     @Volatile private var network: Network? = null
-    @Volatile private var groupInterface: String? = null
+    private var wifiCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var pendingUpstream: String? = null
     private var probe: LatencyProbe? = null
     private var powerReceiver: BroadcastReceiver? = null
@@ -76,6 +75,15 @@ object RelayRuntime {
         }
         callback = cb
         cm.registerDefaultNetworkCallback(cb)
+        val wifiCb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(n: Network) { event("Wi-Fi network available"); r.rebindListen() }
+            override fun onLinkPropertiesChanged(n: Network, lp: android.net.LinkProperties) { r.rebindListen() }
+            override fun onLost(n: Network) { event("Wi-Fi network lost") }
+        }
+        wifiCallback = wifiCb
+        cm.registerNetworkCallback(
+            android.net.NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(), wifiCb
+        )
         relay = r
         if (pendingUpstream == null) {
             pendingUpstream = app.getSharedPreferences("phonehop", Context.MODE_PRIVATE).getString("relay_ip", null)
@@ -86,7 +94,7 @@ object RelayRuntime {
         registerPowerEvents(app)
         val pm = app.getSystemService(PowerManager::class.java)
         probe = LatencyProbe(
-            routerHost = { stats.routerAddress?.address?.hostAddress },
+            routerHost = { if (linkAddress() != null) Link.ROUTER_IP else null },
             internetNetwork = { network },
             internetTarget = { internetTarget },
             screenOn = { pm.isInteractive },
@@ -98,6 +106,8 @@ object RelayRuntime {
     @Synchronized
     fun stop() {
         callback?.let { runCatching { connectivity?.unregisterNetworkCallback(it) } }
+        wifiCallback?.let { runCatching { connectivity?.unregisterNetworkCallback(it) } }
+        wifiCallback = null
         callback = null
         probe?.stop(); probe = null
         powerReceiver?.let { r -> runCatching { appContext?.unregisterReceiver(r) } }
@@ -165,33 +175,21 @@ object RelayRuntime {
         runCatching { relay?.setUpstream(ip, PORT) }
     }
 
-    /** Called when the Wi-Fi Direct group appears, changes or goes away. */
-    fun setGroupInterface(name: String?) {
-        if (name == groupInterface) return
-        groupInterface = name
-        relay?.rebindListen()
-    }
-
     val isRunning get() = relay?.isRunning == true
 
-    /** The phone's address on the Wi-Fi Direct group, read from the group's interface; null while no group is up. */
-    fun groupOwnerAddress(): String? = groupAddress()?.first?.hostAddress
+    /** The phone's own address on the router's link network, or null while it has not joined. */
+    fun linkAddress(): InetAddress? = runCatching {
+        val base = InetAddress.getByName(Link.SUBNET)
+        NetworkInterface.getNetworkInterfaces().toList().flatMap { it.interfaceAddresses }.map { it.address }
+            .firstOrNull { it is Inet4Address && Subnet.contains(base, Link.PREFIX, it) }
+    }.getOrNull()
 
     private fun openUpstreamSocket(): DatagramSocket {
         val n = network ?: throw IOException("no internet network")
         return DatagramSocket().also { n.bindSocket(it) }
     }
 
-    /** The group interface's IPv4 address and prefix, or the standard group-owner address as a fallback. */
-    private fun groupAddress(): Pair<InetAddress, Int>? {
-        val name = groupInterface ?: return null
-        val found = runCatching {
-            NetworkInterface.getByName(name)?.interfaceAddresses
-                ?.firstOrNull { it.address is Inet4Address }
-                ?.let { it.address to it.networkPrefixLength.toInt() }
-        }.getOrNull()
-        return found ?: (InetAddress.getByName(FALLBACK_GO) to 24)
-    }
+    private fun groupAddress(): Pair<InetAddress, Int>? = linkAddress()?.let { it to Link.PREFIX }
 
     private fun describe(c: NetworkCapabilities): String {
         val kind = when {

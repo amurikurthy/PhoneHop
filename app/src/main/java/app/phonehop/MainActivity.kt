@@ -32,7 +32,7 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
-/** Wi-Fi Direct group + Mullvad server selection, traffic graphs and the self-updater. */
+/** Router link + Mullvad server selection, traffic graphs and the self-updater. */
 class MainActivity : Activity() {
     private val io = Executors.newSingleThreadExecutor()
     private val prefs by lazy { getSharedPreferences("phonehop", MODE_PRIVATE) }
@@ -47,8 +47,8 @@ class MainActivity : Activity() {
 
     private lateinit var scroll: ScrollView
     private lateinit var logView: TextView
-    private lateinit var groupStatus: TextView
-    private lateinit var suffixField: EditText
+    private lateinit var linkStatus: TextView
+    private lateinit var ssidField: EditText
     private lateinit var passField: EditText
     private lateinit var accountField: EditText
     private lateinit var accountSavedNote: TextView
@@ -70,14 +70,10 @@ class MainActivity : Activity() {
     private lateinit var wizard: RouterWizard
     private lateinit var lockNote: TextView
     private lateinit var editButton: android.widget.Button
-    private lateinit var bandBox: View
-    private lateinit var bandBlocker: View
-    private var groupUp = false
+    private var lastLinkUp = false
     private var editingGroup = false
     private lateinit var relayStatus: TextView
 
-    private var bandIndex = 2
-    private var lastLoggedGroup: String? = null
     private var autoServer = true
     private var imeBottom = 0
     private var relayList: MullvadApi.RelayList? = null
@@ -96,6 +92,7 @@ class MainActivity : Activity() {
             relayPanel.update(s.relayDown, s.relayUp)
             updateRelayStatus()
             updateLatency()
+            updateLinkStatus()
         }
         RelayRuntime.logSink = ::log
         setContentView(buildUi())
@@ -103,7 +100,6 @@ class MainActivity : Activity() {
         Updater.statusListener = { msg -> setUpdateStatus(msg) }
         // Replay what happened while the screen was away (screen off, Doze, network changes...).
         RelayRuntime.recentEvents().takeLast(60).forEach { logAt(it.at, it.msg) }
-        GroupRuntime.setListener(::showGroup)
         requestPermissionsThenStart()
         // Only on a fresh launch, not on rotation, so we don't re-check repeatedly.
         if (savedInstanceState == null && prefs.getBoolean("auto_update", true)) checkForUpdates(auto = true)
@@ -112,7 +108,8 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         RelayRuntime.event("App in foreground | ${RelayRuntime.snapshotText()}")
-        if (hasP2pPermission()) { GroupRuntime.start(applicationContext); GroupRuntime.refresh(); applyGroupSoon(500) }
+        LinkRuntime.start(applicationContext)
+        applyLinkSoon(500)
         updateBatteryUi()
         monitor.start()
     }
@@ -126,7 +123,6 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         Updater.statusListener = null
-        GroupRuntime.setListener(null)
         RelayRuntime.logSink = {}
         super.onDestroy()
     }
@@ -136,25 +132,20 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- Startup and permissions
 
-    private fun p2pPermission() =
-        if (Build.VERSION.SDK_INT >= 33) Manifest.permission.NEARBY_WIFI_DEVICES else Manifest.permission.ACCESS_FINE_LOCATION
-
     private fun granted(perm: String) = checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED
-
-    private fun hasP2pPermission() = granted(p2pPermission())
 
     /** Asks for everything the app uses in one go, then starts the keep-alive service and server lookup. */
     private fun requestPermissionsThenStart() {
         val missing = mutableListOf<String>()
-        if (!hasP2pPermission()) missing += p2pPermission()
         if (Build.VERSION.SDK_INT >= 33 && !granted(Manifest.permission.POST_NOTIFICATIONS)) missing += Manifest.permission.POST_NOTIFICATIONS
         if (!locator.hasPermission()) missing += Manifest.permission.ACCESS_COARSE_LOCATION
         if (missing.isEmpty()) onPermissionsSettled() else requestPermissions(missing.toTypedArray(), REQ_ALL)
     }
 
     private fun onPermissionsSettled() {
-        if (hasP2pPermission()) { GroupRuntime.start(applicationContext); applyGroupSoon(300) }
-        // Always on: this is what keeps the Wi-Fi Direct group alive with the screen off.
+        LinkRuntime.start(applicationContext)
+        applyLinkSoon(300)
+        // Always on: this keeps the link to the router and the relay alive with the screen off.
         KeepAliveService.start(this)
         fetchServers()
     }
@@ -168,16 +159,15 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- Quit
 
-    /** Removes the group, stops the service (clearing its notification) and closes the app completely. */
+    /** Leaves the link network, stops the service (clearing its notification) and closes the app completely. */
     private fun quit() {
-        log("Quitting: removing Wi-Fi Direct group and stopping background service")
-        GroupRuntime.removeGroup {
-            KeepAliveService.stop(this)
-            monitor.stop()
-            finishAndRemoveTask()
-            // Nothing is left running, so end the process too rather than leaving it cached.
-            Handler(Looper.getMainLooper()).postDelayed({ Process.killProcess(Process.myPid()) }, 300)
-        }
+        log("Quitting: leaving the link network and stopping the background service")
+        LinkRuntime.remove()
+        KeepAliveService.stop(this)
+        monitor.stop()
+        finishAndRemoveTask()
+        // Nothing is left running, so end the process too rather than leaving it cached.
+        Handler(Looper.getMainLooper()).postDelayed({ Process.killProcess(Process.myPid()) }, 300)
     }
 
     // ---------------------------------------------------------------- Updates
@@ -242,50 +232,32 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- UI
 
-    private fun defaultBandIndex(): Int {
-        val wm = applicationContext.getSystemService(WifiManager::class.java)
-        // Index into WifiDirectController.Band: 1 = 2.4 GHz, 2 = 5 GHz. Prefer the fastest the radio has.
-        return if (wm != null && wm.is5GHzBandSupported) 2 else 1
-    }
-
     private fun buildUi(): View {
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        content.addView(ui.appTitle("PhoneHop", "Wi-Fi Direct relay to Mullvad"))
+        content.addView(ui.appTitle("PhoneHop", "Router relay to Mullvad"))
 
-        // ---- Wi-Fi Direct (values are saved so they survive leaving and returning to the app)
+        // ---- Link to the router (values are saved so they survive leaving and returning to the app)
         profiles.active()?.let { p ->
-            prefs.edit().putString(PREF_SUFFIX, p.groupSuffix).putString(PREF_PASS, p.groupPassphrase).putInt(PREF_BAND, p.bandIndex).apply()
+            prefs.edit().putString(PREF_SSID, p.linkSsid).putString(PREF_PASS, p.linkPassphrase).apply()
         }
-        suffixField = ui.field("hop", prefs.getString(PREF_SUFFIX, "hop") ?: "hop")
-        ui.watch(suffixField) { prefs.edit().putString(PREF_SUFFIX, it).apply(); applyGroupSoon() }
+        ssidField = ui.field("PhoneHop-link", prefs.getString(PREF_SSID, null) ?: "PhoneHop-link")
+        ui.watch(ssidField) { prefs.edit().putString(PREF_SSID, it.trim()).apply(); applyLinkSoon() }
         val savedPass = prefs.getString(PREF_PASS, null)
             ?: PassphraseGenerator.generate(20).also { prefs.edit().putString(PREF_PASS, it).apply() }
         passField = ui.field("8 to 63 characters", savedPass)
-        ui.watch(passField) { prefs.edit().putString(PREF_PASS, it).apply(); applyGroupSoon() }
-        bandIndex = prefs.getInt(PREF_BAND, defaultBandIndex())
-        groupStatus = ui.mono("No group.")
-        val bandSegmented = ui.segmented(WifiDirectController.Band.values().map { it.label }, bandIndex) {
-            bandIndex = it
-            prefs.edit().putInt(PREF_BAND, it).apply()
-            applyGroupSoon()
-        }
-        bandBlocker = View(this).apply { isClickable = true; visibility = View.GONE }
-        bandBox = FrameLayout(this).apply {
-            addView(bandSegmented)
-            addView(bandBlocker, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        }
+        ui.watch(passField) { prefs.edit().putString(PREF_PASS, it).apply(); applyLinkSoon() }
+        linkStatus = ui.mono("Starting...")
         lockNote = ui.caption("")
-        editButton = ui.secondary("Unlock to edit") { onEditGroupClicked() }
+        editButton = ui.secondary("Unlock to edit") { onEditLinkClicked() }
         content.addView(
             ui.card(
-                "Wi-Fi Direct group",
-                "The router joins this as a normal Wi-Fi network. The group is created automatically and kept in step with these settings.",
-                ui.labeled("Network name", suffixField, "The SSID will be DIRECT-ph- followed by this name."),
-                ui.labeled("Password", passField, "At least 8 characters."),
-                ui.labeled("Band", bandBox, "5 GHz is fastest. If your phone can't host on 5 GHz it falls back to 2.4 GHz."),
+                "Link to router",
+                "The router hosts a small hidden Wi-Fi network just for this phone. The phone joins it automatically, like a car's Wi-Fi, and keeps using cellular for its own internet.",
+                ui.labeled("Link network name", ssidField, "Only the router and this phone use it."),
+                ui.labeled("Link password", passField, "A strong one is generated. At least 8 characters."),
                 lockNote,
                 editButton,
-                groupStatus,
+                linkStatus,
             ), ui.cardParams(20)
         )
 
@@ -295,7 +267,7 @@ class MainActivity : Activity() {
         content.addView(
             ui.card(
                 "Relay",
-                "Forwards the router's WireGuard traffic to the selected Mullvad server over the phone's internet connection. It only passes valid WireGuard packets from the Wi-Fi Direct group.",
+                "Forwards the router's WireGuard traffic to the selected Mullvad server over the phone's internet connection. It only passes valid WireGuard packets from the router link.",
                 relayStatus,
                 relayPanel,
             ), ui.cardParams()
@@ -315,7 +287,7 @@ class MainActivity : Activity() {
         content.addView(
             ui.card(
                 "Link quality",
-                "Round-trip time to the router over Wi-Fi Direct (link) and to Mullvad over the phone's internet (internet), measured every 2 seconds, even with the screen off.",
+                "Round-trip time to the router over the router link (link) and to Mullvad over the phone's internet (internet), measured every 2 seconds, even with the screen off.",
                 latencyPanel,
                 latencySummary,
                 ui.labeled("Wi-Fi lock", lockSegmented, "Keeps the phone's Wi-Fi radio from power-saving. Try each and watch the graph; Low latency only works with the screen on."),
@@ -326,7 +298,7 @@ class MainActivity : Activity() {
         )
 
         // ---- Live traffic
-        wifiPanel = TrafficPanel(this, "Wi-Fi + Wi-Fi Direct")
+        wifiPanel = TrafficPanel(this, "Wi-Fi (router link)")
         cellPanel = TrafficPanel(this, "Cellular")
         content.addView(
             ui.card(
@@ -396,8 +368,8 @@ class MainActivity : Activity() {
             log = ::log,
             inputs = {
                 RouterWizard.Inputs(
-                    groupSuffix = suffixField.text.toString().trim(), groupPass = passField.text.toString(),
-                    bandIndex = bandIndex, relay = selectedRelay, groupUp = groupUp,
+                    linkSsid = ssidField.text.toString().trim(), linkPass = passField.text.toString(),
+                    relay = selectedRelay, linkUp = RelayRuntime.linkAddress() != null,
                 )
             },
             registerKey = { registerKey() },
@@ -431,7 +403,7 @@ class MainActivity : Activity() {
         content.addView(
             ui.card(
                 "Exit",
-                "Removes the Wi-Fi Direct network, stops the background service and its notification, and closes the app.",
+                "Leaves the link network, stops the background service and its notification, and closes the app.",
                 ui.danger("Quit PhoneHop") { quit() },
             ), ui.cardParams()
         )
@@ -493,53 +465,47 @@ class MainActivity : Activity() {
 
     private fun dp(v: Int) = ui.dp(v)
 
-    /** While a router is paired it has the Wi-Fi Direct name, password and band saved, so they are locked. */
+    /** While a router is paired it has the link network's name and password saved, so they are locked. */
     private fun applyProfileLock() {
         val p = profiles.active()
         val locked = p != null && !editingGroup
-        suffixField.isEnabled = !locked
+        ssidField.isEnabled = !locked
         passField.isEnabled = !locked
-        listOf<View>(suffixField, passField, bandBox).forEach { it.alpha = if (locked) 0.55f else 1f }
-        bandBlocker.visibility = if (locked) View.VISIBLE else View.GONE
+        listOf<View>(ssidField, passField).forEach { it.alpha = if (locked) 0.55f else 1f }
         if (p != null && locked) {
-            if (suffixField.text.toString() != p.groupSuffix) suffixField.setText(p.groupSuffix)
-            if (passField.text.toString() != p.groupPassphrase) passField.setText(p.groupPassphrase)
+            if (ssidField.text.toString() != p.linkSsid) ssidField.setText(p.linkSsid)
+            if (passField.text.toString() != p.linkPassphrase) passField.setText(p.linkPassphrase)
         }
         lockNote.visibility = if (p != null) View.VISIBLE else View.GONE
         lockNote.text = when {
             p == null -> ""
-            editingGroup -> "Editing. The router has the old settings saved, so it will lose the link until you run its setup again."
+            editingGroup -> "Editing. The router has the old settings saved, so the phone will lose the link until you run its setup again."
             p.stale -> "Locked to ${p.title} (${p.shortId}), but the router has older settings: run the router setup again."
-            else -> "Locked to ${p.title} (${p.shortId}). The router has these settings saved; changing them would cut its connection."
+            else -> "Locked to ${p.title} (${p.shortId}). The router has these settings saved; changing them would cut the link."
         }
         editButton.visibility = if (p != null) View.VISIBLE else View.GONE
         editButton.text = if (editingGroup) "Save and lock" else "Unlock to edit"
     }
 
-    private fun onEditGroupClicked() {
+    private fun onEditLinkClicked() {
         val p = profiles.active() ?: return
         if (!editingGroup) {
             android.app.AlertDialog.Builder(this)
-                .setTitle("Change the Wi-Fi Direct network?")
-                .setMessage("${p.title} has the current name and password saved. If you change them, it will lose its link to this phone until you run the router setup again.")
+                .setTitle("Change the link network?")
+                .setMessage("${p.title} has the current name and password saved. If you change them, the phone loses the link until you run the router setup again.")
                 .setNegativeButton("Keep locked", null)
                 .setPositiveButton("Unlock") { _, _ -> editingGroup = true; applyProfileLock() }
                 .show()
         } else {
-            val changed = suffixField.text.toString().trim() != p.groupSuffix || passField.text.toString() != p.groupPassphrase || bandIndex != p.bandIndex
+            val changed = ssidField.text.toString().trim() != p.linkSsid || passField.text.toString() != p.linkPassphrase
             if (changed) {
-                profiles.save(
-                    p.copy(
-                        groupSuffix = suffixField.text.toString().trim(), groupPassphrase = passField.text.toString(),
-                        bandIndex = bandIndex, stale = true,
-                    )
-                )
-                log("Wi-Fi Direct settings changed; the router needs updating")
+                profiles.save(p.copy(linkSsid = ssidField.text.toString().trim(), linkPassphrase = passField.text.toString(), stale = true))
+                log("Link network settings changed; the router needs updating")
             }
             editingGroup = false
             applyProfileLock()
             wizard.render()
-            applyGroupSoon(200)
+            applyLinkSoon(200)
         }
     }
 
@@ -552,42 +518,32 @@ class MainActivity : Activity() {
         if (t.length > 40_000) logView.text = t.subSequence(t.length - 30_000, t.length)
     }
 
-    // ---------------------------------------------------------------- Wi-Fi Direct
+    // ---------------------------------------------------------------- Link to the router
 
     private val uiHandler = Handler(Looper.getMainLooper())
-    private val applyGroup = Runnable { applyGroupNow() }
+    private val applyLink = Runnable { applyLinkNow() }
+    private var linkProblem: String? = null
 
-    /** Waits for typing to pause, then makes the group match the fields. */
-    private fun applyGroupSoon(delayMs: Long = 1_500) {
-        uiHandler.removeCallbacks(applyGroup)
-        uiHandler.postDelayed(applyGroup, delayMs)
+    /** Waits for typing to pause, then makes Android's Wi-Fi suggestion match the fields. */
+    private fun applyLinkSoon(delayMs: Long = 1_500) {
+        uiHandler.removeCallbacks(applyLink)
+        uiHandler.postDelayed(applyLink, delayMs)
     }
 
-    private fun applyGroupNow() {
-        if (!hasP2pPermission()) { groupStatus.text = "Allow nearby devices access to create the network."; return }
-        GroupRuntime.start(applicationContext)
-        val band = WifiDirectController.Band.values()[bandIndex]
-        val problem = GroupRuntime.ensure(suffixField.text.toString().trim(), passField.text.toString(), band)
-        if (problem != null) groupStatus.text = problem
-        else if (groupStatus.text.isNullOrBlank() || groupStatus.text == "No group.") groupStatus.text = "Starting the network..."
+    private fun applyLinkNow() {
+        linkProblem = LinkRuntime.ensure(ssidField.text.toString().trim(), passField.text.toString())
+        updateLinkStatus()
     }
 
-    private fun showGroup(group: WifiP2pGroup?) = runOnUiThread {
-        val up = group != null
-        if (up != groupUp) { groupUp = up; if (::wizard.isInitialized) wizard.render() }
-        if (group == null) { groupStatus.text = "No group."; return@runOnUiThread }
-        val clients = group.clientList.joinToString("\n") { "    ${it.deviceName.ifEmpty { "?" }} ${it.deviceAddress}" }
-        groupStatus.text = buildString {
-            appendLine("SSID:        ${group.networkName}")
-            appendLine("Passphrase:  ${group.passphrase}")
-            appendLine("Owner:       ${if (group.isGroupOwner) "this phone (expect 192.168.49.1)" else group.owner?.deviceAddress}")
-            appendLine("Interface:   ${group.`interface`}")
-            append("Clients:     ${group.clientList.size}")
-            if (clients.isNotEmpty()) append("\n$clients")
-        }
-        if (group.networkName != lastLoggedGroup) {
-            lastLoggedGroup = group.networkName
-            log("Group up: ${group.networkName}")
+    private fun updateLinkStatus() {
+        val addr = RelayRuntime.linkAddress()
+        val up = addr != null
+        if (up != lastLinkUp) { lastLinkUp = up; if (::wizard.isInitialized) wizard.render() }
+        linkStatus.text = linkProblem ?: buildString {
+            appendLine("Network:  ${ssidField.text}")
+            appendLine("Phone:    ${addr?.hostAddress?.let { "joined as $it" } ?: "not joined yet"}")
+            if (up) append("Router:   ${Link.ROUTER_IP}")
+            else append("The phone joins once the router is set up. If Android asks about a Wi-Fi suggestion, tap Allow.")
         }
     }
 
@@ -652,7 +608,7 @@ class MainActivity : Activity() {
         fun ago(t: Long) = if (t == 0L) "never" else "${(now - t) / 1000}s ago"
         val router = st.routerAddress
         relayStatus.text = buildString {
-            appendLine("Listening:  ${st.listening ?: "waiting for the Wi-Fi Direct group"}")
+            appendLine("Listening:  ${st.listening ?: "waiting for the phone to join the link network"}")
             appendLine("Server:     ${st.upstreamText ?: "none selected"} (last reply ${ago(st.lastFromUpstreamAt)})")
             appendLine("Internet:   ${RelayRuntime.internetText}")
             appendLine("Router:     ${router?.let { "${it.address.hostAddress}:${it.port} (last packet ${ago(st.lastFromRouterAt)})" } ?: "not seen yet"}")
@@ -741,7 +697,7 @@ class MainActivity : Activity() {
             )
         }
         latencySummary.text = buildString {
-            appendLine("Last 10 min         p50    p95     max spikes")
+            appendLine("10 min             p50    p95    max  n>150")
             appendLine(row("Link, screen on", recent.filter { it.screenOn }.mapNotNull { it.linkMs }))
             appendLine(row("Link, screen off", recent.filter { !it.screenOn }.mapNotNull { it.linkMs }))
             appendLine(row("Internet, on", recent.filter { it.screenOn }.mapNotNull { it.internetMs }))
@@ -858,9 +814,8 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_ALL = 1
-        private const val PREF_SUFFIX = "p2p_suffix"
-        private const val PREF_PASS = "p2p_pass"
-        private const val PREF_BAND = "p2p_band"
+        private const val PREF_SSID = "link_ssid"
+        private const val PREF_PASS = "link_pass"
         private const val PREF_AUTO = "server_auto"
         private const val PREF_RELAY = "relay_host"
     }

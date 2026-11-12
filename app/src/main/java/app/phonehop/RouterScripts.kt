@@ -7,7 +7,7 @@ import java.util.TimeZone
 
 /** Everything the router needs to be configured. */
 data class RouterPlan(
-    /** Wi-Fi Direct network the router joins, e.g. DIRECT-ph-hop. */
+    /** Name of the hidden link network the router hosts for the phone. */
     val phoneSsid: String,
     val phonePassphrase: String,
     val prefer5Ghz: Boolean,
@@ -17,7 +17,7 @@ data class RouterPlan(
     val wgAddressV6: String = "",
     val serverPublicKey: String,
     /** Where the router sends WireGuard packets: the phone's address on the Wi-Fi Direct link. */
-    val relayHost: String = "192.168.49.1",
+    val relayHost: String = Link.PHONE_IP,
     val relayPort: Int = 51820,
     val dns: String = "10.64.0.1",
     /**
@@ -67,6 +67,7 @@ object RouterScripts {
         if (p.clientPassphrase.length !in 8..63 || bad(p.clientPassphrase)) return "Your Wi-Fi password must be 8 to 63 characters"
         if (p.country.isNotEmpty() && !Regex("^[A-Z]{2}$").matches(p.country)) return "Country code must be two capital letters"
         LanPlan.validate(LanPlan.Lan(p.lanAddress, p.lanPrefix), LanPlan.Lan(p.relayHost, 24))?.let { return it }
+        if (p.relayHost != Link.PHONE_IP) return "The phone's link address must be ${Link.PHONE_IP}"
         if (p.rollbackSeconds !in 60..86_400) return "Rollback time is not valid"
         return null
     }

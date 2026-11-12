@@ -62,7 +62,7 @@ class RouterScriptsTest {
         assertNull(RouterScripts.validate(plan(clientSsid = "x".repeat(27))))
         assertNotNull(RouterScripts.validate(plan(clientPass = "short")))
         assertNotNull(RouterScripts.validate(plan(country = "usa")))
-        assertNotNull(RouterScripts.validate(plan(lan = "192.168.49.1")))   // the phone link range
+        assertNotNull(RouterScripts.validate(plan(lan = "192.168.51.1")))   // the phone link range
         assertNotNull(RouterScripts.validate(plan(lan = "10.66.0.1")))      // Mullvad's tunnel range
         assertNotNull(RouterScripts.validate(plan(lan = "8.8.8.1")))        // not private
         assertNull(RouterScripts.validate(plan(lan = "172.20.5.1", lanPrefix = 16)))
@@ -258,11 +258,13 @@ class RouterScriptsTest {
         assertEquals(listOf("0"), r.get("wireless.radio0.disabled"))
         assertEquals(listOf("0"), r.get("wireless.radio1.disabled"))
         assertEquals(listOf("US"), r.get("wireless.radio1.country"))
-        // --- joins the phone's network on the 5 GHz radio
-        assertEquals(listOf("radio1"), r.get("wireless.phonehop_sta.device"))
-        assertEquals(listOf("sta"), r.get("wireless.phonehop_sta.mode"))
-        assertEquals(listOf("DIRECT-ph-hop"), r.get("wireless.phonehop_sta.ssid"))
-        assertEquals(listOf("phonehop-4821"), r.get("wireless.phonehop_sta.key"))
+        // --- the router hosts a hidden link network for the phone on the 5 GHz radio
+        assertFalse(r.has("wireless.phonehop_sta"))
+        assertEquals(listOf("ap"), r.get("wireless.phonehop_link.mode"))
+        assertEquals(listOf("radio1"), r.get("wireless.phonehop_link.device"))
+        assertEquals(listOf("DIRECT-ph-hop"), r.get("wireless.phonehop_link.ssid"))
+        assertEquals(listOf("phonehop-4821"), r.get("wireless.phonehop_link.key"))
+        assertEquals(listOf("1"), r.get("wireless.phonehop_link.hidden"))
         // --- your own Wi-Fi: one network per radio with your name and password
         assertEquals(listOf("My Network_2.4G"), r.get("wireless.phonehop_ap_radio0.ssid"))
         assertEquals(listOf("My Network_5G"), r.get("wireless.phonehop_ap_radio1.ssid"))
@@ -276,13 +278,14 @@ class RouterScriptsTest {
         assertEquals(listOf("100"), r.get("dhcp.lan.start"))
         assertEquals(listOf("150"), r.get("dhcp.lan.limit"))
         assertTrue(out, out.contains("PHONEHOP_LAN=192.168.50.1/255.255.255.0"))
-        // --- phone link must not provide a default route or DNS
-        assertEquals(listOf("0"), r.get("network.phonehop.defaultroute"))
-        assertEquals(listOf("0"), r.get("network.phonehop.peerdns"))
+        // --- the link: a /30 with one lease and no gateway or DNS handed out
+        assertEquals(listOf("192.168.51.1"), r.get("network.phonelink.ipaddr"))
+        assertEquals(listOf("1"), r.get("dhcp.phonelink.limit"))
+        assertEquals(listOf("3", "6"), r.get("dhcp.phonelink.dhcp_option"))
         // --- tunnel points at the phone
         assertEquals(listOf("wireguard"), r.get("network.mullvad.proto"))
         assertEquals(listOf("10.66.1.2/32", "fc00:bbbb:bbbb:bb01::2:102/128"), r.get("network.mullvad.addresses"))
-        assertEquals(listOf("192.168.49.1"), r.get("network.mullvad_peer.endpoint_host"))
+        assertEquals(listOf("192.168.51.2"), r.get("network.mullvad_peer.endpoint_host"))
         assertEquals(listOf("51820"), r.get("network.mullvad_peer.endpoint_port"))
         assertEquals(listOf("0.0.0.0/0", "::/0"), r.get("network.mullvad_peer.allowed_ips"))
         assertEquals(listOf(serverKey), r.get("network.mullvad_peer.public_key"))
@@ -290,8 +293,8 @@ class RouterScriptsTest {
         assertFalse(r.has("firewall.@forwarding[0]"))
         assertEquals(listOf("lan"), r.get("firewall.phonehop_lan_vpn.src"))
         assertEquals(listOf("vpn"), r.get("firewall.phonehop_lan_vpn.dest"))
-        assertEquals(listOf("wan", "phonehop"), r.get("firewall.@zone[1].network"))
-        assertEquals(listOf("192.168.49.1"), r.get("firewall.phonehop_ssh.src_ip"))
+        assertEquals(listOf("wan"), r.get("firewall.@zone[1].network"))
+        assertEquals(listOf("192.168.51.2"), r.get("firewall.phonehop_ssh.src_ip"))
         // --- DNS only through the tunnel; SSH not pinned to the LAN
         assertEquals(listOf("10.64.0.1"), r.get("dhcp.@dnsmasq[0].server"))
         assertEquals(listOf("1"), r.get("dhcp.@dnsmasq[0].noresolv"))
@@ -335,7 +338,7 @@ class RouterScriptsTest {
         r.pristineFile.writeText(r.pristineFile.readLines().filter { !it.startsWith("wireless.radio1") && !it.startsWith("wireless.default_radio1") }.joinToString("\n") + "\n")
         val (code, out) = run(r, RouterScripts.setup(plan(prefer5 = true)))
         assertEquals(out, 0, code)
-        assertEquals(listOf("radio0"), r.get("wireless.phonehop_sta.device"))
+        assertEquals(listOf("radio0"), r.get("wireless.phonehop_link.device"))
     }
 
     @Test fun setupIsIdempotent() {
@@ -344,7 +347,7 @@ class RouterScriptsTest {
         val firstBackup = File(r.dir, "backup/config.tgz").readBytes()
         assertEquals(0, run(r, RouterScripts.setup(plan())).first)
         assertEquals(listOf("0.0.0.0/0", "::/0"), r.get("network.mullvad_peer.allowed_ips"))
-        assertEquals(listOf("wan", "phonehop"), r.get("firewall.@zone[1].network"))
+        assertEquals(listOf("wan"), r.get("firewall.@zone[1].network"))
         assertEquals(listOf("10.64.0.1"), r.get("dhcp.@dnsmasq[0].server"))
         // The backup is of the TRUE original and is never overwritten by a later run.
         assertTrue(firstBackup.contentEquals(File(r.dir, "backup/config.tgz").readBytes()))
@@ -420,7 +423,7 @@ class RouterScriptsTest {
         assertEquals(out, 0, code)
         assertTrue(out.contains("PHONEHOP_SERVER_UPDATED"))
         assertEquals(listOf(newKey), r.get("network.mullvad_peer.public_key"))
-        assertEquals(listOf("192.168.49.1"), r.get("network.mullvad_peer.endpoint_host")) // untouched
+        assertEquals(listOf("192.168.51.2"), r.get("network.mullvad_peer.endpoint_host")) // untouched
     }
 
     @Test fun switchingServerRefusesWhenNothingIsSetUp() {
@@ -447,4 +450,38 @@ class RouterScriptsTest {
     @Test fun rejectsABadServerKey() {
         try { RouterScripts.server("nope"); fail("expected rejection") } catch (_: IllegalArgumentException) {}
     }
+
+    @Test fun clientModeHostsAHiddenLinkNetworkForThePhone() {
+        val r = newRouter() ?: return
+        val (code, out) = run(r, RouterScripts.setup(plan()))
+        assertEquals(out, 0, code)
+        assertTrue(out, out.contains("PHONEHOP_APPLIED"))
+        // no client-mode (join the phone) config; instead a hidden AP just for the phone
+        assertFalse(r.has("wireless.phonehop_sta"))
+        assertEquals(listOf("ap"), r.get("wireless.phonehop_link.mode"))
+        assertEquals(listOf("radio1"), r.get("wireless.phonehop_link.device"))
+        assertEquals(listOf("DIRECT-ph-hop"), r.get("wireless.phonehop_link.ssid"))
+        assertEquals(listOf("phonehop-4821"), r.get("wireless.phonehop_link.key"))
+        assertEquals(listOf("1"), r.get("wireless.phonehop_link.hidden"))
+        assertEquals(listOf("1"), r.get("wireless.phonehop_link.dtim_period"))
+        // a /30 with exactly one lease, and no gateway or DNS handed out
+        assertEquals(listOf("192.168.51.1"), r.get("network.phonelink.ipaddr"))
+        assertEquals(listOf("255.255.255.252"), r.get("network.phonelink.netmask"))
+        assertEquals(listOf("1"), r.get("dhcp.phonelink.limit"))
+        assertEquals(listOf("3", "6"), r.get("dhcp.phonelink.dhcp_option"))
+        // the tunnel's endpoint is the phone's fixed address; only the phone may SSH in over the link
+        assertEquals(listOf("192.168.51.2"), r.get("network.mullvad_peer.endpoint_host"))
+        assertEquals(listOf("phonelink"), r.get("firewall.phonehop_ssh.src"))
+        assertEquals(listOf("192.168.51.2"), r.get("firewall.phonehop_ssh.src_ip"))
+        assertEquals(listOf("phonelink"), r.get("firewall.phonehop_linkzone.network"))
+        // the kill switch is unchanged
+        assertFalse(r.has("firewall.@forwarding[0]"))
+        assertEquals(listOf("vpn"), r.get("firewall.phonehop_lan_vpn.dest"))
+    }
+
+    @Test fun clientModeRequiresTheFixedPhoneAddress() {
+        assertNotNull(RouterScripts.validate(plan().copy(relayHost = "192.168.49.1")))
+        assertNull(RouterScripts.validate(plan()))
+    }
+
 }

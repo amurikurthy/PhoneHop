@@ -39,7 +39,7 @@ class KeepAliveService : Service() {
         )
         val notification = Notification.Builder(this, CHANNEL)
             .setContentTitle("PhoneHop is running")
-            .setContentText("Keeping the Wi-Fi Direct group alive")
+            .setContentText("Keeping the link to your router alive")
             .setSmallIcon(R.drawable.ic_launcher_monochrome)
             .setContentIntent(open)
             .addAction(
@@ -63,7 +63,7 @@ class KeepAliveService : Service() {
         }
         applyWifiLock()
         RelayRuntime.start(applicationContext)
-        GroupRuntime.start(applicationContext)
+        LinkRuntime.start(applicationContext)
         return START_STICKY
     }
 

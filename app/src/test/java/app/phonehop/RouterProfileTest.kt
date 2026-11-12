@@ -9,7 +9,7 @@ import org.junit.Test
 class RouterProfileTest {
     private fun profile(id: String = "SN1", suffix: String = "hop", stale: Boolean = false) = RouterProfile(
         id = id, model = "GL.iNet GL-AR750S-Ext", mac = "94:83:c4:0a:1b:2c", serial = "SN1",
-        groupSuffix = suffix, groupPassphrase = "p&ss=w0rd +é", bandIndex = 2,
+        linkSsid = suffix, linkPassphrase = "p&ss=w0rd +é", bandIndex = 2,
         clientSsid = "My Net & More", createdAt = 1000L, stale = stale,
         serverHost = "de-fra-wg-005", serverIp = "146.70.1.2", serverKey = "B".repeat(43) + "=", lanCidr = "192.168.50.1/24",
     )
@@ -61,5 +61,11 @@ class RouterProfileTest {
         assertEquals(20, a.length)
         assertTrue(a.none { it in "0O1lI" })
         assertFalse(a == PassphraseGenerator.generate(20))
+    }
+
+    @Test fun profilesFromTheOldWifiDirectDesignAreIgnored() {
+        val kv = MemoryKeyValueStore()
+        kv.put("router_profile_SN1", "id=SN1&suffix=hop&pass=abcdefgh&band=2&created=1&stale=false")
+        assertTrue(ProfileStore(kv).all().isEmpty())
     }
 }

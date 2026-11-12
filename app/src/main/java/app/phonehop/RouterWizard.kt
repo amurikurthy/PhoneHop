@@ -32,8 +32,8 @@ class RouterWizard(
     private val onProfileChanged: () -> Unit,
 ) {
     data class Inputs(
-        val groupSuffix: String, val groupPass: String, val bandIndex: Int,
-        val relay: MullvadApi.Relay?, val groupUp: Boolean,
+        val linkSsid: String, val linkPass: String,
+        val relay: MullvadApi.Relay?, val linkUp: Boolean,
     )
 
     private enum class Step(val label: String) {
@@ -88,8 +88,8 @@ class RouterWizard(
         return "Step $n of ${Step.values().size}: $steps" + (extra?.let { "\n$it" } ?: "")
     }
 
-    /** The phone's address on the Wi-Fi Direct link: read from the live group, else the Android default. */
-    private fun phoneLink() = RelayRuntime.groupOwnerAddress() ?: "192.168.49.1"
+    /** The phone's fixed address on the router's link network. */
+    private fun phoneLink() = Link.PHONE_IP
 
     private fun problemView() = ui.caption(problem).apply {
         setTextColor(Glass.RED)
@@ -110,7 +110,7 @@ class RouterWizard(
         val kids = mutableListOf<View>(
             line(hasKey, if (hasKey) "Mullvad key registered" else "Mullvad key not registered yet"),
             line(i.relay != null, i.relay?.let { "VPN server: ${it.hostname} (${it.city})" } ?: "No VPN server chosen yet"),
-            line(if (i.groupUp) true else null, if (i.groupUp) "Wi-Fi Direct network is up; the router will reach this phone at ${phoneLink()}" else "Wi-Fi Direct network is starting"),
+            line(if (i.linkUp) true else null, if (i.linkUp) "Phone is on the link network (${phoneLink()})" else "Phone joins the link network after the router is set up"),
         )
         if (!hasKey) {
             kids += ui.caption("Enter your Mullvad account number in the Mullvad card above, then register this phone.")
@@ -149,7 +149,7 @@ class RouterWizard(
             "Router setup", subtitle("This is the network your own devices will join. The router's old Wi-Fi and addressing are erased."),
             ui.labeled("Wi-Fi name", name, "Up to ${RouterScripts.MAX_WIFI_BASE_NAME} characters. _5G and _2.4G are added so each band is its own network."),
             ui.labeled("Wi-Fi password", pass, "A strong one is suggested. Change it if you like."),
-            ui.labeled("Router IP address and range", lan, "The router's own address, e.g. 192.168.50.1/24. Avoid ${phoneLink().substringBeforeLast('.')}.x (the phone link) and 10.64 to 10.127 (Mullvad)."),
+            ui.labeled("Router IP address and range", lan, "The router's own address, e.g. 192.168.50.1/24. Avoid ${phoneLink().substringBeforeLast('.')}.x (the router link) and 10.64 to 10.127 (Mullvad)."),
             preview,
             ui.secondary("Suggest a new password") {
                 wifiPass = PassphraseGenerator.generate(16)
@@ -260,7 +260,7 @@ class RouterWizard(
                 "Address:     $routerHost\n" +
                 "Your Wi-Fi:  $w5\n             $w24\n" +
                 "Router IP:   $lanText\n" +
-                "Phone link:  DIRECT-ph-${i.groupSuffix}\n" +
+                "Link network: ${i.linkSsid}\n" +
                 "VPN server:  ${i.relay?.hostname ?: "none"}", 12f
         )
         val confirmText = ui.field("WIPE", "")
@@ -296,7 +296,7 @@ class RouterWizard(
         val lan = LanPlan.parse(lanText) ?: return Pair(null, "Enter the router's address like 192.168.50.1/24.")
         val country = activity.resources.configuration.locales[0].country.uppercase().takeIf { it.length == 2 } ?: ""
         val plan = RouterPlan(
-            phoneSsid = "DIRECT-ph-${i.groupSuffix}", phonePassphrase = i.groupPass, prefer5Ghz = i.bandIndex == 2,
+            phoneSsid = i.linkSsid, phonePassphrase = i.linkPass, prefer5Ghz = true,
             wgPrivateKey = priv, wgAddressV4 = v4, wgAddressV6 = prefs.getString("ipv6", "").orEmpty(),
             serverPublicKey = relay.publicKey, clientSsid = wifiName, clientPassphrase = wifiPass, country = country,
             lanAddress = lan.address, lanPrefix = lan.prefix, relayHost = phoneLink(),
@@ -381,7 +381,7 @@ class RouterWizard(
         say("The router is restarting its network and will join ${plan.phoneSsid}...")
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(6_000)
-            val addr = RelayRuntime.stats.routerAddress?.address?.hostAddress
+            val addr = (if (RelayRuntime.linkAddress() != null) Link.ROUTER_IP else null)
             if (addr == null) { say("Waiting for the router to join ${plan.phoneSsid} (it can take a minute)..."); continue }
             try {
                 val res = ssh(addr).run(addr, pw, RouterScripts.status(), timeoutMs = 20_000)
@@ -414,7 +414,7 @@ class RouterWizard(
         profiles.save(
             RouterProfile(
                 id = pid, model = id?.model.orEmpty(), mac = id?.mac.orEmpty(), serial = id?.serial.orEmpty(),
-                groupSuffix = i.groupSuffix, groupPassphrase = i.groupPass, bandIndex = i.bandIndex,
+                linkSsid = i.linkSsid, linkPassphrase = i.linkPass, bandIndex = 2,
                 clientSsid = wifiName, createdAt = System.currentTimeMillis(),
                 serverHost = relay.hostname, serverIp = relay.ipv4, serverKey = relay.publicKey, lanCidr = lanText,
             )
@@ -441,7 +441,7 @@ class RouterWizard(
         val (w5, w24) = RouterScripts.wifiNames(p.clientSsid)
         val info = ui.mono(
             "Router:     ${p.title}\nID:         ${p.shortId}\n" +
-                "Wi-Fi:      $w5\n            $w24\nRouter IP:  ${p.lanCidr.ifBlank { "unknown" }}\nPhone link: DIRECT-ph-${p.groupSuffix}\n" +
+                "Wi-Fi:      $w5\n            $w24\nRouter IP:  ${p.lanCidr.ifBlank { "unknown" }}\nLink network: ${p.linkSsid}\n" +
                 "VPN server: ${p.serverHost}${if (p.stale) "\n\nThe phone's network settings changed after setup; run setup again to update the router." else ""}",
             12f
         )
@@ -458,7 +458,7 @@ class RouterWizard(
         )
     }
 
-    private fun managementHost(): String? = RelayRuntime.stats.routerAddress?.address?.hostAddress
+    private fun managementHost(): String? = (if (RelayRuntime.linkAddress() != null) Link.ROUTER_IP else null)
 
     private fun storedPassword(p: RouterProfile) = runCatching { secrets.get("router_admin_${p.id}") }.getOrNull()
 

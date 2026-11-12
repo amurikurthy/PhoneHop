@@ -31,7 +31,7 @@ object RouterDiscovery {
             }
         }
         RelayRuntime.stats.routerAddress?.address?.hostAddress?.let {
-            found += Candidate(it, null, "the router seen over Wi-Fi Direct")
+            found += Candidate(it, null, "the router link")
         }
         return found.distinctBy { it.host }
     }
