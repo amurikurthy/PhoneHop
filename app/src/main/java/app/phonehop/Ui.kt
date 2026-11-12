@@ -133,6 +133,54 @@ class Ui(private val ctx: Context) {
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(14) })
     }
 
+    /** A small heading that separates groups of cards (for example "Advanced"). */
+    fun sectionLabel(t: String) = TextView(ctx).apply {
+        text = t.uppercase(); textSize = 11.5f; letterSpacing = 0.12f; setTextColor(Glass.TEXT_2); typeface = medium
+        setPadding(dp(6), dp(26), 0, dp(2))
+    }
+
+    /** The headline status card: a coloured dot, a big state, one line of detail, and the technical checklist behind "Details". */
+    class StatusHero(val view: View, private val dot: GradientDrawable, private val title: TextView, private val sub: TextView) {
+        fun set(h: StatusSummary.Headline) {
+            title.text = h.title; sub.text = h.subtitle
+            sub.visibility = if (h.subtitle.isEmpty()) View.GONE else View.VISIBLE
+            dot.setColor(when (h.level) {
+                StatusSummary.Level.GOOD -> Color.parseColor("#7FC8A0")
+                StatusSummary.Level.WARN -> Color.parseColor("#D9B26B")
+                StatusSummary.Level.IDLE -> Color.parseColor("#6F7681")
+            })
+        }
+    }
+
+    fun statusHero(details: View): StatusHero {
+        val dot = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.parseColor("#6F7681")) }
+        val title = TextView(ctx).apply { text = "Starting..."; textSize = 26f; setTextColor(Glass.TEXT); typeface = bold }
+        val sub = TextView(ctx).apply { text = ""; textSize = 14f; setTextColor(Glass.TEXT_2); visibility = View.GONE }
+        val toggle = TextView(ctx).apply { text = "Details \u25B8"; textSize = 13f; setTextColor(Glass.TEXT_2); setPadding(0, dp(10), 0, dp(2)) }
+        details.visibility = View.GONE
+        toggle.setOnClickListener {
+            val open = details.visibility != View.VISIBLE
+            details.visibility = if (open) View.VISIBLE else View.GONE
+            toggle.text = if (open) "Details \u25BE" else "Details \u25B8"
+        }
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(View(ctx).apply { background = dot }, LinearLayout.LayoutParams(dp(12), dp(12)).apply { marginEnd = dp(12) })
+            addView(title)
+        }
+        val card = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(20), dp(20), dp(16))
+            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(Glass.CARD_TOP, Glass.CARD_BOTTOM))
+                .apply { cornerRadius = dp(24).toFloat(); setStroke(dp(1), Glass.STROKE) }
+            addView(row)
+            addView(sub, lp(dp(4)))
+            addView(toggle)
+            addView(details, lp(dp(6)))
+        }
+        return StatusHero(card, dot, title, sub)
+    }
+
     fun caption(t: String) = TextView(ctx).apply { text = t; textSize = 12.5f; setTextColor(Glass.TEXT_2) }
 
     fun mono(t: String, sizeSp: Float = 12f) = QuietTextView(ctx).apply {
@@ -286,8 +334,8 @@ class Ui(private val ctx: Context) {
                 shown -> InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
                 else -> InputType.TYPE_TEXT_VARIATION_PASSWORD
             }
+            // No setSingleLine() here: it swaps the password masking for a plain single-line display.
             field.inputType = cls or variation
-            field.setSingleLine()
             field.setSelection(field.text.length)
             eye.setImageResource(if (shown) R.drawable.ic_eye_off else R.drawable.ic_eye)
             eye.contentDescription = if (shown) "Hide" else "Show"

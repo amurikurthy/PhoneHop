@@ -49,6 +49,7 @@ class MainActivity : Activity() {
     private lateinit var logView: TextView
     private lateinit var linkStatus: TextView
     private lateinit var statusView: TextView
+    private lateinit var statusHero: Ui.StatusHero
     private lateinit var ssidField: EditText
     private lateinit var passField: EditText
     private lateinit var accountField: EditText
@@ -93,6 +94,7 @@ class MainActivity : Activity() {
         // Settings left over from the old Wi-Fi Direct design and from the removed latency experiments.
         prefs.edit().remove("p2p_suffix").remove("p2p_pass").remove("p2p_band").remove("keep_warm").remove("wifi_lock_mode").apply()
         setContentView(buildUi())
+        updateStatusCard()
         log("PhoneHop ${versionName()} on Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), ${Build.MANUFACTURER} ${Build.MODEL}")
         Updater.statusListener = { msg -> setUpdateStatus(msg) }
         requestPermissionsThenStart()
@@ -230,9 +232,11 @@ class MainActivity : Activity() {
         // Sections are collected as they are built, then added in the order a person would use them.
         val placed = mutableListOf<Pair<View, ViewGroup.LayoutParams?>>()
         fun place(v: View, p: ViewGroup.LayoutParams? = null) { placed += Pair(v, p) }
-        place(ui.appTitle("PhoneHop", "Router relay to Mullvad"))
+        place(ui.appTitle("PhoneHop", "Your router, through Mullvad"))
+        val advancedLabel = ui.sectionLabel("Advanced")
         statusView = ui.mono("Starting...", 12f)
-        place(ui.card("Status", null, statusView), ui.cardParams(20))
+        statusHero = ui.statusHero(statusView)
+        place(statusHero.view, ui.cardParams(20))
 
         // ---- Link to the router (values are saved so they survive leaving and returning to the app)
         profiles.active()?.let { p ->
@@ -246,8 +250,8 @@ class MainActivity : Activity() {
         passField = ui.field("", savedPass).apply { isEnabled = false; alpha = 0.55f }
         linkStatus = ui.mono("Starting...")
         place(
-            ui.card(
-                "Link to router",
+            ui.collapsible(
+                "Router link",
                 "The router hosts a small hidden Wi-Fi network just for this phone. The phone joins it automatically, like a car's Wi-Fi, and keeps using cellular for its own internet. Nothing here needs configuring.",
                 ui.labeled("Link network name", ssidField, "Generated for you and not editable."),
                 ui.labeled("Link password", passField, "Random and not editable. Copy it if you ever need it."),
@@ -256,7 +260,7 @@ class MainActivity : Activity() {
                     log("Link password copied to the clipboard")
                 },
                 linkStatus,
-            ), ui.cardParams(20)
+            ), ui.cardParams(12)
         )
 
         // ---- Relay
@@ -264,7 +268,7 @@ class MainActivity : Activity() {
         relayPanel = TrafficPanel(this, "Relayed: router and Mullvad")
         place(
             ui.collapsible(
-                "Relay",
+                "Relay activity",
                 "Forwards the router's WireGuard traffic to the selected Mullvad server over the phone's internet connection. It only passes valid WireGuard packets from the router link.",
                 relayStatus,
                 relayPanel,
@@ -317,7 +321,7 @@ class MainActivity : Activity() {
         place(
             ui.card(
                 "Mullvad",
-                "Used only to talk to Mullvad. Once it has worked it is remembered on this phone, encrypted with the Android Keystore, until you forget it. It is never logged.",
+                "Your account number stays on this phone, encrypted, and is only ever sent to Mullvad.",
                 ui.labeled("Account number", accountBox, "16 digits, from mullvad.net/account. Tap the eye to show or hide it."),
                 accountSavedNote,
                 forgetAccountButton,
@@ -363,7 +367,7 @@ class MainActivity : Activity() {
         // ---- Log
         logView = ui.mono("", 11f)
         place(
-            ui.collapsible("Log", "Recent events: link, network and relay changes. Nothing here contains your account number, passwords or keys.", logView, ui.secondary("Clear log") { logView.text = "" }),
+            ui.collapsible("Event log", "Recent events: link, network and relay changes. Nothing here contains your account number, passwords or keys.", logView, ui.secondary("Clear log") { logView.text = "" }),
             ui.cardParams()
         )
 
@@ -395,10 +399,12 @@ class MainActivity : Activity() {
         content.isFocusable = true
         content.isFocusableInTouchMode = true
         content.revealOnFocusHint = false
-        // Order of use: title, status, Mullvad (account, server, key), router setup, the link, the technical cards (folded), updates, exit.
-        // Built order: 0 title, 1 status, 2 link, 3 relay, 4 quality, 5 traffic, 6 mullvad, 7 router setup, 8 log, 9 updates, 10 exit.
+        // Order of use: title, status, Mullvad (account, server, key), router setup, then the technical cards (all folded) under
+        // an "Advanced" heading, then updates and exit.
+        // Built order: 0 title, 1 status, 2 router link, 3 relay, 4 background use, 5 traffic, 6 mullvad, 7 router setup, 8 log, 9 updates, 10 exit.
         check(placed.size == 11) { "unexpected number of sections: ${placed.size}" }
-        listOf(0, 1, 6, 7, 2, 3, 4, 5, 8, 9, 10).forEachIndexed { position, i ->
+        listOf(0, 1, 6, 7, -1, 2, 3, 4, 5, 8, 9, 10).forEachIndexed { position, i ->
+            if (i == -1) { content.addView(advancedLabel); return@forEachIndexed }
             val (view, params) = placed[i]
             // The first card under the title gets a little more room.
             if (position == 1) content.addView(view, ui.cardParams(20))
@@ -641,8 +647,7 @@ class MainActivity : Activity() {
     private fun updateStatusCard() {
         val st = RelayRuntime.stats
         val heard = if (st.lastFromRouterAt == 0L) null else (System.currentTimeMillis() - st.lastFromRouterAt) / 1000
-        statusView.text = StatusSummary.build(
-            StatusSummary.In(
+        val input = StatusSummary.In(
                 hasKey = prefs.getString("priv", null) != null,
                 serverName = selectedRelay?.hostname,
                 linkAddress = RelayRuntime.linkAddress()?.hostAddress,
@@ -650,7 +655,8 @@ class MainActivity : Activity() {
                 routerHeardSecondsAgo = heard,
                 relayedBytes = st.fromRouter.get() + st.toRouter.get(),
             )
-        )
+        statusView.text = StatusSummary.build(input)
+        statusHero.set(StatusSummary.headline(input))
     }
 
     private fun updateBatteryUi() {

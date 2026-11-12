@@ -27,4 +27,27 @@ class StatusSummaryTest {
     @Test fun keyWithoutServerSaysSo() {
         assertTrue(StatusSummary.build(base.copy(serverName = null)).contains("choosing a server"))
     }
+
+    // ---- the one-glance headline
+    private fun h(i: StatusSummary.In) = StatusSummary.headline(i)
+
+    @Test fun headlineWalksThroughSetupInOrder() {
+        assertTrue(h(base.copy(hasKey = false)).title == "Set up needed")
+        assertTrue(h(base.copy(serverName = null)).title == "Choosing a server")
+        assertTrue(h(base.copy(routerTitle = null)).title == "Set up your router")
+        assertTrue(h(base.copy(linkAddress = null)).title == "Waiting for your router")
+    }
+
+    @Test fun headlineIsConnectedOnlyWhileTheRouterIsBeingHeard() {
+        val ok = h(base)
+        assertTrue(ok.title == "Connected" && ok.level == StatusSummary.Level.GOOD && ok.subtitle.contains("de-fra-wg-005"))
+        val stale = h(base.copy(routerHeardSecondsAgo = 500))
+        assertTrue(stale.title == "Ready" && stale.level == StatusSummary.Level.IDLE)
+        assertTrue(h(base.copy(routerHeardSecondsAgo = null)).title == "Ready")
+    }
+
+    @Test fun missingPiecesAreWarningsNotErrors() {
+        assertTrue(h(base.copy(hasKey = false)).level == StatusSummary.Level.WARN)
+        assertTrue(h(base.copy(routerTitle = null)).level == StatusSummary.Level.WARN)
+    }
 }

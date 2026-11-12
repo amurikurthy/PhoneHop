@@ -11,6 +11,20 @@ object StatusSummary {
         val relayedBytes: Long,
     )
 
+    enum class Level { GOOD, WARN, IDLE }
+    data class Headline(val title: String, val subtitle: String, val level: Level)
+
+    /** The one-glance answer for the top of the screen: how things stand and what to do next. */
+    fun headline(i: In): Headline = when {
+        !i.hasKey -> Headline("Set up needed", "Add your Mullvad account to get started.", Level.WARN)
+        i.serverName == null -> Headline("Choosing a server", "Finding the nearest Mullvad server...", Level.IDLE)
+        i.routerTitle == null -> Headline("Set up your router", "Use Router setup below to prepare it.", Level.WARN)
+        i.linkAddress == null -> Headline("Waiting for your router", "Turn the router on and keep it close to the phone.", Level.IDLE)
+        i.routerHeardSecondsAgo != null && i.routerHeardSecondsAgo < 120 ->
+            Headline("Connected", "Routing through ${i.serverName} \u00B7 ${TrafficMath.formatBytes(i.relayedBytes)} so far", Level.GOOD)
+        else -> Headline("Ready", "Waiting for traffic from your router.", Level.IDLE)
+    }
+
     fun build(i: In): String {
         val mullvad = when {
             !i.hasKey -> "\u2717 Register a key in the Mullvad card"
