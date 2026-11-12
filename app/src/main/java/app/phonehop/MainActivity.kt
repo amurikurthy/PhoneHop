@@ -691,6 +691,7 @@ class MainActivity : Activity() {
                     "Server last reply" to ago(st.lastFromUpstreamAt),
                     "Relayed up/down" to "${st.fromRouter.get()} / ${st.toRouter.get()} bytes",
                     "Dropped / send errors" to "${st.dropped.get()} / ${st.sendErrors.get()}",
+                    "Dropped by reason" to "bad sender ${st.dropBadSender.get()}, not WireGuard ${st.dropNotWireGuard.get()}, no route ${st.dropNoRoute.get()}, wrong server ${st.dropWrongServer.get()}",
                     "Socket re-opens (upstream/listener)" to "${st.upstreamRebinds.get()} / ${st.listenRebinds.get()}",
                     "Relay forwarding, slowest" to "${st.maxForwardUs.get() / 1000.0} ms",
                     "Internet network" to RelayRuntime.internetText,

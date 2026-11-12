@@ -24,6 +24,11 @@ class RelayStats {
     /** Bytes received from the VPN server (heading to the router). */
     val toRouter = AtomicLong()
     val dropped = AtomicLong()
+    /** Why packets were dropped (each also counts in [dropped]). */
+    val dropBadSender = AtomicLong()      // from the router side but not an allowed sender
+    val dropNotWireGuard = AtomicLong()   // wrong shape for a WireGuard message
+    val dropNoRoute = AtomicLong()        // nowhere to send it yet (no server, socket being re-opened, router unknown)
+    val dropWrongServer = AtomicLong()    // arrived on the upstream socket from something other than the server
     /** Tunnel round trips seen by the relay, and the slowest time (microseconds) it took to forward one packet. */
     val rtt = RttLog()
     val maxForwardUs = AtomicLong()
@@ -180,13 +185,11 @@ class Relay(
     private fun onFromRouter(p: DatagramPacket) {
         val startedNs = System.nanoTime()
         val src = InetSocketAddress(p.address, p.port)
-        if (!allowedSource(p.address) || !WireGuardPacket.isValid(p.data, p.length)) {
-            stats.dropped.incrementAndGet()
-            return
-        }
+        if (!allowedSource(p.address)) { stats.dropped.incrementAndGet(); stats.dropBadSender.incrementAndGet(); return }
+        if (!WireGuardPacket.isValid(p.data, p.length)) { stats.dropped.incrementAndGet(); stats.dropNotWireGuard.incrementAndGet(); return }
         val target = upstream
         val up = upstreamSocket
-        if (target == null || up == null) { stats.dropped.incrementAndGet(); return }
+        if (target == null || up == null) { stats.dropped.incrementAndGet(); stats.dropNoRoute.incrementAndGet(); return }
         if (stats.routerAddress != src) {
             stats.routerAddress = src
             log("Router seen at ${src.address.hostAddress}:${src.port}")
@@ -238,12 +241,13 @@ class Relay(
         val expected = upstream
         if (expected == null || p.address != expected.address || p.port != expected.port) {
             stats.dropped.incrementAndGet() // not from our server
+            stats.dropWrongServer.incrementAndGet()
             return
         }
-        if (!WireGuardPacket.isValid(p.data, p.length)) { stats.dropped.incrementAndGet(); return }
+        if (!WireGuardPacket.isValid(p.data, p.length)) { stats.dropped.incrementAndGet(); stats.dropNotWireGuard.incrementAndGet(); return }
         val router = stats.routerAddress
         val out = listenSocket
-        if (router == null || out == null) { stats.dropped.incrementAndGet(); return }
+        if (router == null || out == null) { stats.dropped.incrementAndGet(); stats.dropNoRoute.incrementAndGet(); return }
         stats.lastFromUpstreamAt = System.currentTimeMillis()
         stats.toRouter.addAndGet(p.length.toLong())
         lastReplyNs = System.nanoTime()

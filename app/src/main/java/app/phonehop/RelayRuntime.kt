@@ -105,8 +105,8 @@ object RelayRuntime {
             cellCb
         )
         val wifiCb = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(n: Network) { event("Wi-Fi network available"); r.rebindListen() }
-            override fun onLinkPropertiesChanged(n: Network, lp: android.net.LinkProperties) { r.rebindListen() }
+            override fun onAvailable(n: Network) { event("Wi-Fi network available"); rebindListenIfLinkChanged(r) }
+            override fun onLinkPropertiesChanged(n: Network, lp: android.net.LinkProperties) { rebindListenIfLinkChanged(r) }
             override fun onLost(n: Network) { event("Wi-Fi network lost") }
         }
         wifiCallback = wifiCb
@@ -216,6 +216,23 @@ object RelayRuntime {
     val isRunning get() = relay?.isRunning == true
 
     /** The phone's own address on the router's link network, or null while it has not joined. */
+    private var listenNetwork: Network? = null
+    private var listenAddress: String? = null
+
+    /**
+     * Re-opens the listener only when the router link really changed (a different network or address).
+     * Any other Wi-Fi event, such as a different Wi-Fi network or a routine property update, used to re-open it
+     * too, which dropped every packet that arrived in the gap.
+     */
+    @Synchronized
+    private fun rebindListenIfLinkChanged(r: Relay) {
+        val net = linkNetwork()
+        val addr = linkAddress()?.hostAddress
+        if (net == listenNetwork && addr == listenAddress) return
+        listenNetwork = net; listenAddress = addr
+        r.rebindListen()
+    }
+
     fun linkAddress(): InetAddress? = runCatching {
         val base = InetAddress.getByName(Link.SUBNET)
         NetworkInterface.getNetworkInterfaces().toList().flatMap { it.interfaceAddresses }.map { it.address }
