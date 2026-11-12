@@ -63,9 +63,9 @@ object DiagnosticsReport {
             appendLine("== Tunnel round trips seen by the relay (ms, newest last) ==")
             appendLine(if (i.tunnelRtt.isEmpty()) "none" else i.tunnelRtt.joinToString(" ") { "%.0f".format(Locale.US, it) })
             appendLine()
-            appendLine("== Samples: time,screen,link_ms,internet_ms,relayed_kbps,internet2_ms,other_kbps,signal_dbm ==")
+            appendLine("== Samples: time,screen,link_ms,internet_ms,relayed_kbps,internet2_ms,other_kbps ==")
             i.samples.forEach {
-                appendLine("${t(it.at)},${if (it.screenOn) "on" else "off"},${it.linkMs?.let { v -> "%.0f".format(Locale.US, v) } ?: ""},${it.internetMs?.let { v -> "%.0f".format(Locale.US, v) } ?: ""},${"%.0f".format(Locale.US, it.loadKbps)},${it.internet2Ms?.let { v -> "%.0f".format(Locale.US, v) } ?: ""},${"%.0f".format(Locale.US, it.otherKbps)},${it.signalDbm ?: ""}")
+                appendLine("${t(it.at)},${if (it.screenOn) "on" else "off"},${it.linkMs?.let { v -> "%.0f".format(Locale.US, v) } ?: ""},${it.internetMs?.let { v -> "%.0f".format(Locale.US, v) } ?: ""},${"%.0f".format(Locale.US, it.loadKbps)},${it.internet2Ms?.let { v -> "%.0f".format(Locale.US, v) } ?: ""},${"%.0f".format(Locale.US, it.otherKbps)}")
             }
             appendLine()
             appendLine("== Events ==")

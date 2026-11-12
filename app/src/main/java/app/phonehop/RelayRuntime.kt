@@ -91,10 +91,7 @@ object RelayRuntime {
                 if (cellular == n) { cellular = null; event("Cellular lost"); r.rebindUpstream() }
             }
             override fun onCapabilitiesChanged(n: Network, c: NetworkCapabilities) {
-                if (n == cellular) {
-                    internetText = describe(c)
-                    cellSignal = c.signalStrength.takeIf { it != NetworkCapabilities.SIGNAL_STRENGTH_UNSPECIFIED }
-                }
+                if (n == cellular) internetText = describe(c)
             }
         }
         cellularCallback = cellCb
@@ -133,7 +130,6 @@ object RelayRuntime {
             loadKbps = ::currentLoadKbps,
             internet2Target = { InetSocketAddress("1.1.1.1", 443) },
             otherKbps = { lastOtherKbps },
-            signalDbm = { cellSignal },
         ).also { it.start() }
         event("Relay started")
     }
@@ -189,6 +185,7 @@ object RelayRuntime {
                     else -> return
                 }
                 event("$what | ${snapshotText()}")
+                if (i.action == Intent.ACTION_SCREEN_ON || i.action == Intent.ACTION_SCREEN_OFF || i.action == Intent.ACTION_USER_PRESENT) warmBurst()
             }
         }
         val filter = IntentFilter().apply {
@@ -283,11 +280,35 @@ object RelayRuntime {
         }, "link-warm").apply { isDaemon = true; start() }
     }
 
+    /**
+     * A short rush of tiny packets to the router and to the VPN server. Android re-tunes the Wi-Fi and cellular radios
+     * when the screen turns on or off, and a packet caught in that moment can wait several hundred milliseconds; this wakes
+     * both radios first. Does nothing when keep-warm is off.
+     */
+    private fun warmBurst() {
+        if (!keepWarm) return
+        Thread({
+            var socket: DatagramSocket? = null
+            try {
+                linkNetwork()?.let { n -> socket = DatagramSocket().also { n.bindSocket(it) } }
+                val target = InetAddress.getByName(Link.ROUTER_IP)
+                repeat(10) {
+                    relay?.poke()
+                    socket?.send(java.net.DatagramPacket(ByteArray(1), 1, target, 9))
+                    Thread.sleep(30)
+                }
+            } catch (e: Exception) {
+                // best effort
+            } finally {
+                runCatching { socket?.close() }
+            }
+        }, "warm-burst").apply { isDaemon = true; start() }
+    }
+
     private var loadBytes = 0L
     private var loadAt = 0L
     private var mobileBytes = 0L
     @Volatile private var lastOtherKbps = 0.0
-    @Volatile private var cellSignal: Int? = null
 
     /** Relayed kilobits per second since the previous call (both directions). */
     @Synchronized

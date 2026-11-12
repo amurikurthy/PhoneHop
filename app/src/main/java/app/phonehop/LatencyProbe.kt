@@ -9,12 +9,11 @@ import javax.net.SocketFactory
 /** [loadKbps] is how much traffic the relay was carrying when the sample was taken (kilobits per second). */
 /**
  * [internet2Ms] is a second, unrelated server over the same path (if both spike together the phone's cellular path is
- * at fault, if only one does it is that server); [otherKbps] is the phone's other cellular traffic (not the relay's);
- * [signalDbm] is the cellular signal strength when the network reports it.
+ * at fault, if only one does it is that server); [otherKbps] is the phone's other cellular traffic (not the relay's).
  */
 data class LatencySample(
     val at: Long, val screenOn: Boolean, val linkMs: Double?, val internetMs: Double?, val loadKbps: Double = 0.0,
-    val internet2Ms: Double? = null, val otherKbps: Double = 0.0, val signalDbm: Int? = null,
+    val internet2Ms: Double? = null, val otherKbps: Double = 0.0,
 )
 
 /** Thread-safe ring buffer of recent samples. */
@@ -75,7 +74,6 @@ class LatencyProbe(
     private val loadKbps: () -> Double = { 0.0 },
     private val internet2Target: () -> InetSocketAddress? = { null },
     private val otherKbps: () -> Double = { 0.0 },
-    private val signalDbm: () -> Int? = { null },
 ) {
     @Volatile private var running = false
     private var thread: Thread? = null
@@ -97,7 +95,7 @@ class LatencyProbe(
                     measureConnectMs(target2, timeoutMs) { net.socketFactory.createSocket() }
                 } else null
                 val load = loadKbps()
-                val sample = LatencySample(System.currentTimeMillis(), screenOn(), link, internet, load, internet2, otherKbps(), signalDbm())
+                val sample = LatencySample(System.currentTimeMillis(), screenOn(), link, internet, load, internet2, otherKbps())
                 log.add(sample)
                 onSample(sample)
                 val wait = intervalMs - (System.currentTimeMillis() - started)
