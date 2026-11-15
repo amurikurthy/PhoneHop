@@ -66,6 +66,7 @@ class MainActivity : Activity() {
     private lateinit var cellPanel: TrafficPanel
     private lateinit var relayPanel: TrafficPanel
     private lateinit var batteryNote: TextView
+    private lateinit var backgroundNote: TextView
     private lateinit var batteryButton: View
     private val profiles by lazy { ProfileStore(PrefsKeyValueStore(prefs)) }
     private lateinit var wizard: RouterWizard
@@ -85,6 +86,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         quitting = false
         getSharedPreferences("phonehop", MODE_PRIVATE).edit().putBoolean(KeepAliveService.PREF_USER_QUIT, false).apply()
+        setServiceEnabled(true) // Quit switches the background service off completely; opening the app switches it back on
         if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false)
         monitor = TrafficMonitor(
             relayTotals = { Pair(RelayRuntime.stats.toRouter.get(), RelayRuntime.stats.fromRouter.get()) }
@@ -133,6 +135,18 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
+    /** Enables or disables the background service component. While disabled, nothing can start it (not even Android itself). */
+    private fun setServiceEnabled(enabled: Boolean) {
+        runCatching {
+            packageManager.setComponentEnabledSetting(
+                android.content.ComponentName(this, KeepAliveService::class.java),
+                if (enabled) android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
+                else android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                android.content.pm.PackageManager.DONT_KILL_APP,
+            )
+        }
+    }
+
     private fun versionName() =
         runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull() ?: "?"
 
@@ -176,6 +190,10 @@ class MainActivity : Activity() {
         LinkRuntime.remove()
         KeepAliveService.stop(this)
         RelayRuntime.stop()
+        BackgroundLog.stopped(this, "you quit the app")
+        BackgroundLog.acknowledgeRestarts(this)
+        // Switch the service off at the system level too: until the app is opened again, Android cannot start it at all.
+        setServiceEnabled(false)
         finishAndRemoveTask()
         // End the process once the service has really stopped (or after two seconds at most), so nothing is left cached
         // or restarted.
@@ -301,11 +319,13 @@ class MainActivity : Activity() {
 
         // ---- Background use
         batteryNote = ui.caption("")
+        backgroundNote = ui.caption("")
         batteryButton = ui.secondary("Allow background use") { requestBatteryExemption() }
         place(
             ui.collapsible(
                 "Background use",
-                "To keep latency low the app holds the phone's Wi-Fi out of power-save and sends tiny packets (to the router and to the Mullvad server) only while the link is quiet. Normal traffic keeps the radios awake by itself.",
+                "The app only keeps the phone awake while the router is actually using it. Searching for the router or sitting idle costs almost nothing; the Wi-Fi lock and the tiny keep-awake packets run only while traffic is flowing. Quit PhoneHop at the bottom switches everything off.",
+                backgroundNote,
                 batteryNote,
                 batteryButton,
             ), ui.cardParams()
@@ -737,6 +757,7 @@ class MainActivity : Activity() {
             )
         statusView.text = StatusSummary.build(input)
         statusHero.set(StatusSummary.headline(input))
+        backgroundNote.text = BackgroundLog.summary(this, KeepAliveService.running, if (KeepAliveService.running) RelayRuntime.mode else null)
     }
 
     private fun updateBatteryUi() {

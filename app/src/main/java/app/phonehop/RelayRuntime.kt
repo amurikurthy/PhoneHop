@@ -27,6 +27,14 @@ object RelayRuntime {
     @Volatile var internetText: String = "no internet network"
     @Volatile var logSink: (String) -> Unit = {}
 
+    /** How awake the app is keeping the phone right now; see [PowerPolicy]. */
+    @Volatile var mode: PowerMode = PowerMode.SEARCHING
+        private set
+    private var appliedMode: PowerMode? = null
+    private var powerThread: Thread? = null
+    /** Called (on any thread) when the mode changes, and once at start, so the service can hold or drop its locks. */
+    @Volatile var powerListener: ((PowerMode) -> Unit)? = null
+
     @Volatile private var relay: Relay? = null
     @Volatile private var network: Network? = null
     private var wifiCallback: ConnectivityManager.NetworkCallback? = null
@@ -94,7 +102,7 @@ object RelayRuntime {
         val wifiCb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(n: Network) { event("Wi-Fi network available"); rebindListenIfLinkChanged(r) }
             override fun onLinkPropertiesChanged(n: Network, lp: android.net.LinkProperties) { rebindListenIfLinkChanged(r) }
-            override fun onLost(n: Network) { event("Wi-Fi network lost") }
+            override fun onLost(n: Network) { event("Wi-Fi network lost"); evaluatePower() }
         }
         wifiCallback = wifiCb
         cm.registerNetworkCallback(
@@ -107,8 +115,14 @@ object RelayRuntime {
         pendingUpstream?.let { runCatching { r.setUpstream(it, PORT) } }
         r.start()
         appContext = app
-        startKeepWarm()
         registerPowerEvents(app)
+        // Decides, every couple of seconds, how much to keep awake (and applies it straight away at start).
+        powerThread = Thread({
+            while (!Thread.currentThread().isInterrupted) {
+                evaluatePower()
+                try { Thread.sleep(2_000) } catch (e: InterruptedException) { break }
+            }
+        }, "power-mode").apply { isDaemon = true; start() }
         event("Relay started")
     }
 
@@ -124,6 +138,9 @@ object RelayRuntime {
         powerReceiver?.let { r -> runCatching { appContext?.unregisterReceiver(r) } }
         powerReceiver = null
         keepWarm = false
+        powerThread?.interrupt(); powerThread = null
+        appliedMode = null
+        mode = PowerMode.SEARCHING
         relay?.stop()
         relay = null
         network = null
@@ -229,7 +246,7 @@ object RelayRuntime {
      * both radios first.
      */
     private fun warmBurst() {
-        if (!keepWarm) return
+        if (mode != PowerMode.ACTIVE) return // nothing is in use; let the radios rest
         Thread({
             var socket: DatagramSocket? = null
             try {
@@ -262,7 +279,21 @@ object RelayRuntime {
     fun upstreamNetwork(): Network? = cellular ?: network?.takeIf { !isLinkNetwork(it) }
 
     /** Called when the link network has been joined: the listener must bind to it. */
-    fun linkJoined() { relay?.rebindListen() }
+    fun linkJoined() { relay?.rebindListen(); evaluatePower() }
+
+    /** Works out the current [mode] from the link and the traffic, and applies it: keep-warm and the service's locks follow it. */
+    @Synchronized
+    fun evaluatePower() {
+        if (relay == null) return
+        val sinceData = stats.lastDataAt.takeIf { it != 0L }?.let { System.currentTimeMillis() - it }
+        val next = PowerPolicy.decide(linkAddress() != null, sinceData)
+        if (next == appliedMode) return
+        appliedMode = next
+        mode = next
+        event("Power: ${next.description}")
+        if (PowerPolicy.wantsKeepWarm(next)) startKeepWarm() else keepWarm = false
+        powerListener?.invoke(next)
+    }
 
     private fun isLinkNetwork(n: Network): Boolean {
         val base = runCatching { InetAddress.getByName(Link.SUBNET) }.getOrNull() ?: return false

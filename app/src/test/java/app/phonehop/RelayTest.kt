@@ -190,6 +190,29 @@ class RelayTest {
         assertTrue(before > 0)
     }
 
+    // ---- activity tracking drives the power modes
+    @Test fun onlyRealDataCountsAsActivity() {
+        assertEquals(0L, relay.stats.lastDataAt)
+        sendToRelay(router, wgData(32)) // an empty keepalive
+        await { relay.stats.fromRouter.get() == 32L }
+        assertEquals(0L, relay.stats.lastDataAt)
+        sendToRelay(router, ByteArray(148).also { it[0] = 1 }) // a handshake
+        await { relay.stats.fromRouter.get() == 180L }
+        assertEquals(0L, relay.stats.lastDataAt)
+        sendToRelay(router, wgData(100)) // real data
+        await { relay.stats.lastDataAt > 0L }
+    }
+
+    @Test fun dataFromTheServerCountsToo() {
+        sendToRelay(router, wgData(32))
+        val seen = receive(server)
+        server.send(DatagramPacket(wgData(32), 32, seen.address, seen.port)) // keepalive back
+        await { relay.stats.toRouter.get() == 32L }
+        assertEquals(0L, relay.stats.lastDataAt)
+        server.send(DatagramPacket(wgData(500), 500, seen.address, seen.port))
+        await { relay.stats.lastDataAt > 0L }
+    }
+
     // ---- self-heal watchdog (fast timings so the tests are quick)
     private fun healingRelay(): Relay = Relay(
         { loopback }, 0, { true }, { DatagramSocket(0, loopback) },

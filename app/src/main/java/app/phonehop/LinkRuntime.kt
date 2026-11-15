@@ -64,7 +64,7 @@ object LinkRuntime {
                 RelayRuntime.linkJoined()
             }
             override fun onLost(n: Network) {
-                if (network == n) { network = null; RelayRuntime.event("Lost the link network") }
+                if (network == n) { network = null; RelayRuntime.event("Lost the link network"); RelayRuntime.evaluatePower() }
             }
             override fun onUnavailable() {
                 // Android gave up on this request (router still starting, out of range, or a scan that missed). A request
@@ -92,7 +92,7 @@ object LinkRuntime {
     }
 
     private const val RETRY_FIRST_MS = 5_000L
-    private const val RETRY_MAX_MS = 30_000L
+    private const val RETRY_MAX_MS = 300_000L // with no router around, search only every few minutes
 
     /** Stops the link request (used when quitting). The phone leaves the link network. */
     @Synchronized

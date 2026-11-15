@@ -22,6 +22,8 @@ class RelayStats {
     val listenRebinds = AtomicLong()
     @Volatile var routerAddress: InetSocketAddress? = null
     @Volatile var lastFromRouterAt = 0L
+    /** Last time a real data packet passed in either direction. Keepalives (32 bytes) and handshakes do not count. */
+    @Volatile var lastDataAt = 0L
     @Volatile var lastFromUpstreamAt = 0L
     @Volatile var listening: String? = null
     @Volatile var upstreamText: String? = null
@@ -29,6 +31,9 @@ class RelayStats {
 
 /** Shape checks for WireGuard's four message types so the relay never forwards arbitrary junk. */
 object WireGuardPacket {
+    /** A transport packet that carries real data: more than the 32 bytes of an empty keepalive. */
+    fun isData(buf: ByteArray, len: Int) = len > 32 && buf[0].toInt() == 4
+
     fun isValid(buf: ByteArray, len: Int): Boolean {
         if (len < 32) return false
         if (buf[1].toInt() != 0 || buf[2].toInt() != 0 || buf[3].toInt() != 0) return false // reserved bytes
@@ -178,6 +183,7 @@ class Relay(
             log("Router seen at ${src.address.hostAddress}:${src.port}")
         }
         stats.lastFromRouterAt = System.currentTimeMillis()
+        if (WireGuardPacket.isData(p.data, p.length)) stats.lastDataAt = stats.lastFromRouterAt
         stats.fromRouter.addAndGet(p.length.toLong())
         receivedSinceRouterPacket.set(0)
         sentSinceReply.addAndGet(p.length.toLong())
@@ -227,6 +233,7 @@ class Relay(
         val out = listenSocket
         if (router == null || out == null) { stats.dropped.incrementAndGet(); return }
         stats.lastFromUpstreamAt = System.currentTimeMillis()
+        if (WireGuardPacket.isData(p.data, p.length)) stats.lastDataAt = stats.lastFromUpstreamAt
         stats.toRouter.addAndGet(p.length.toLong())
         sentSinceReply.set(0)
         receivedSinceRouterPacket.addAndGet(p.length.toLong())

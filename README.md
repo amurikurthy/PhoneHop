@@ -92,14 +92,17 @@ On launch the app checks this repository's latest GitHub release, downloads the 
 
 ### Background use and exit
 
-A foreground service keeps the relay running with the screen off, shown as a single quiet notification. For best results allow unrestricted battery use (the **Background use** card has a button). **Quit PhoneHop** at the bottom leaves the link network, stops the service and closes the app. The link is tied to the app, so quitting disconnects it; reopening the app rejoins it automatically and retries with a growing delay if Android cannot join at first.
+A foreground service keeps the relay running with the screen off, shown as a single quiet notification. For best results allow unrestricted battery use (the **Background use** card has a button). That card also states plainly whether the background service is running, since when, and, after you quit, when and why it stopped.
+
+**Quit PhoneHop** at the bottom leaves the link network, stops the service and closes the app. It also switches the service off at the system level, so until you open the app again nothing can start it, not even Android restarting it by itself. The link is tied to the app, so quitting disconnects it; reopening the app rejoins it automatically and retries with a growing delay (up to every five minutes) if Android cannot join at first.
 
 ## Latency and battery
 
 In testing on 5G, round trips through the whole path were typically about 45 to 70 ms from a laptop behind the router. The slow cases on phones are radios that go to sleep between sparse packets, and queues filling up on the cellular link. The app and router setup counter these:
 
-- **Low-latency Wi-Fi lock** keeps the phone's Wi-Fi out of power-save while the relay runs.
-- **Keep-warm packets**: a one-byte packet to the router every 150 ms and to the Mullvad server about every 450 ms, so neither radio drops into a sleep state where every packet waits for it to wake. **A packet is skipped when relayed traffic has just kept that radio busy**, so you only pay for it while the link is quiet.
+- **Three power modes** so the phone is only kept awake while the tunnel is really used. *Searching* (router link not joined): nothing is held. *Idle* (router connected, only 32-byte WireGuard keepalives passing): just the CPU wake lock, so keepalives are answered, and the radios may sleep. *Active* (real traffic in the last two minutes): everything below is on. Overnight with the router off or idle, the phone stays cool.
+- **Low-latency Wi-Fi lock** (active mode) keeps the phone's Wi-Fi out of power-save while traffic flows.
+- **Keep-warm packets** (active mode only): a one-byte packet to the router every 150 ms and to the Mullvad server about every 450 ms, so neither radio drops into a sleep state where every packet waits for it to wake. **A packet is skipped when relayed traffic has just kept that radio busy**, so you only pay for it while the link is quiet.
 - **Wake burst**: a short rush of tiny packets when the screen turns on or off or the phone is unlocked, because Android retunes the radios then.
 - **Self-heal watchdog**: if the relay sees one-way traffic with no answer for a while, it re-opens the stalled socket.
 - **Router queue management**: the router shapes traffic with `cake` (or `htb` + `fq_codel` if `cake` is missing) so the queue stays on the router, not in the carrier's buffer. The default speeds are 30 Mbit down and 10 Mbit up; edit `/etc/phonehop-sqm.conf` on the router to about 85 to 90% of what your cellular link really delivers. It is re-applied whenever the firewall reloads.

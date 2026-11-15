@@ -46,28 +46,43 @@ class KeepAliveService : Service() {
             return START_NOT_STICKY
         }
         running = true
+        BackgroundLog.started(this, restartedBySystem = intent == null)
 
-        if (wakeLock == null) {
-            wakeLock = getSystemService(PowerManager::class.java)
-                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PhoneHop:keepalive")
-                .apply { setReferenceCounted(false); acquire() }
-        }
-        applyWifiLock()
+        // The locks follow how much the tunnel is really used: none while searching for the router, the CPU lock while it is
+        // connected, and the Wi-Fi lock too only while traffic is flowing.
+        RelayRuntime.powerListener = { mode -> applyPower(mode) }
         RelayRuntime.start(applicationContext)
+        applyPower(RelayRuntime.mode)
         LinkRuntime.start(applicationContext)
         return START_STICKY
     }
 
-    /** Low-latency Wi-Fi lock: keeps the Wi-Fi radio out of power-save while the relay runs. */
+    /** Holds or drops the CPU wake lock and the low-latency Wi-Fi lock to match [mode]. */
     @Suppress("DEPRECATION")
-    private fun applyWifiLock() {
-        if (wifiLock?.isHeld == true) return
-        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "PhoneHop:wifi").apply { setReferenceCounted(false); acquire() }
+    @Synchronized
+    private fun applyPower(mode: PowerMode) {
+        if (!running) return
+        if (PowerPolicy.wantsWakeLock(mode)) {
+            val lock = wakeLock ?: getSystemService(PowerManager::class.java)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PhoneHop:keepalive").apply { setReferenceCounted(false) }.also { wakeLock = it }
+            if (!lock.isHeld) lock.acquire()
+        } else wakeLock?.takeIf { it.isHeld }?.release()
+
+        if (PowerPolicy.wantsWifiLock(mode)) {
+            val lock = wifiLock ?: (applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager)
+                .createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "PhoneHop:wifi").apply { setReferenceCounted(false) }.also { wifiLock = it }
+            if (!lock.isHeld) lock.acquire()
+        } else wifiLock?.takeIf { it.isHeld }?.release()
     }
 
     override fun onDestroy() {
         running = false
+        RelayRuntime.powerListener = null
+        BackgroundLog.stopped(
+            this,
+            if (getSharedPreferences("phonehop", Context.MODE_PRIVATE).getBoolean(PREF_USER_QUIT, false)) "you quit the app"
+            else "Android or the system stopped it"
+        )
         RelayRuntime.stop()
         wakeLock?.takeIf { it.isHeld }?.release()
         wifiLock?.takeIf { it.isHeld }?.release()
